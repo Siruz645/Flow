@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { Flow } from 'flow-sdk';
-import { MagicInspector } from './components/MagicInspector';
+import { MagicInspector, RegionItem } from './components/MagicInspector';
 import { ModificationPanel } from './components/ModificationPanel';
 import { HistoryGallery } from './components/HistoryGallery';
 import { useObjectDetector } from './hooks/useObjectDetector';
@@ -41,7 +41,11 @@ export default function App() {
   const [mediaSize, setMediaSize] = useState<{width: number, height: number} | null>(null);
   const [detections, setDetections] = useState<Detection[]>([]);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
-  const [manualBox, setManualBox] = useState<Box | null>(null);
+  
+  // Multi-Region Selection State
+  const [manualRegions, setManualRegions] = useState<RegionItem[]>([]);
+  const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
+
   const [candidates, setCandidates] = useState<number[]>([]); 
   const [refinementIndex, setRefinementIndex] = useState<number | null>(null); 
   const [isProcessing, setIsProcessing] = useState(false);
@@ -121,7 +125,6 @@ export default function App() {
 
   const handleReceiveFromBasic = async (mediaItem: { base64: string; mimeType: string; name: string }) => {
     try {
-      // Register in Flow media store so reference editing works reliably
       const uploaded = await Flow.upload({
         base64: mediaItem.base64,
         mimeType: mediaItem.mimeType as any,
@@ -153,11 +156,32 @@ export default function App() {
   const resetEditorState = () => {
     setDetections([]);
     setSelectedIndex(null);
-    setManualBox(null);
+    setManualRegions([]);
+    setSelectedRegionId(null);
     setCandidates([]);
     setRefinementIndex(null);
     setResultImage(null);
     setError(null);
+  };
+
+  const handleAddRegion = (box: Box) => {
+    const nextIndex = manualRegions.length + 1;
+    const newRegion: RegionItem = {
+      id: crypto.randomUUID(),
+      name: `Область ${nextIndex}`,
+      box: box
+    };
+    setManualRegions(prev => [...prev, newRegion]);
+    setSelectedIndex(null);
+  };
+
+  const handleDeleteRegion = (id: string) => {
+    setManualRegions(prev => {
+      const filtered = prev.filter(r => r.id !== id);
+      // Re-index so names are always cleanly sequenced (Область 1, Область 2, ...)
+      return filtered.map((r, idx) => ({ ...r, name: `Область ${idx + 1}` }));
+    });
+    if (selectedRegionId === id) setSelectedRegionId(null);
   };
 
   const runDetection = async (media: HistoryItem) => {
@@ -188,28 +212,30 @@ export default function App() {
     }
   };
 
-  const handleModify = async (prompt: string) => {
+  const handleModify = async (userPrompt: string) => {
     if (!activeMedia || !mediaSize) return;
     setIsProcessing(true);
     setError(null);
     try {
-      let targetInfo = 'the whole scene';
-      
-      if (manualBox) {
-        if (refinementIndex !== null) {
-          const det = detections[refinementIndex];
-          targetInfo = `the specific ${det.label} in the selected region`;
-        } else {
-          targetInfo = 'the selected region of the image';
-        }
-      } else if (selectedIndex !== null) {
-        const det = detections[selectedIndex];
-        targetInfo = `the ${det.label}`;
+      let spatialContext = '';
+      if (manualRegions.length > 0) {
+        const descriptions = manualRegions.map(r => {
+          const cX = (r.box.originX + r.box.width / 2) / mediaSize.width;
+          const cY = (r.box.originY + r.box.height / 2) / mediaSize.height;
+          const h = cX < 0.35 ? 'left' : cX > 0.65 ? 'right' : 'center';
+          const v = cY < 0.35 ? 'top' : cY > 0.65 ? 'bottom' : 'middle';
+          return `"${r.name}" (${h}-${v} area)`;
+        }).join(', ');
+        spatialContext = `Spatial reference of user-marked areas: ${descriptions}. `;
+      } else if (selectedIndex !== null && detections[selectedIndex]) {
+        spatialContext = `Focus target: ${detections[selectedIndex].label}. `;
       }
 
       const aspect = getFlowAspectRatio(mediaSize.width, mediaSize.height);
+      const promptToModel = `${spatialContext}Modify the image as instructed: ${userPrompt}. Keep overall background lighting, scene perspective, and photographic coherence.`;
+
       const generation = await Flow.generate.image({
-        prompt: `Modify ${targetInfo} as follows: ${prompt}. Keep the rest of the scene composition, background, and lighting completely natural and consistent with the original image.`,
+        prompt: promptToModel,
         referenceBase64: activeMedia.base64,
         referenceMimeType: activeMedia.mimeType,
         referenceImageMediaIds: [activeMedia.mediaId],
@@ -225,7 +251,7 @@ export default function App() {
         base64: generation.base64,
         mimeType: generation.mimeType || 'image/png',
         mediaId: generation.mediaId || `edit-${crypto.randomUUID()}`,
-        name: `Результат: ${prompt.slice(0, 15)}...`,
+        name: `Результат: ${userPrompt.slice(0, 15)}...`,
         id: crypto.randomUUID()
       });
       
@@ -260,26 +286,9 @@ export default function App() {
     resetEditorState();
   };
 
-  const findCandidates = useCallback((box: Box) => {
-    const found: number[] = [];
-    detections.forEach((d, idx) => {
-      const obj = d.boundingBox;
-      const xOverlap = Math.max(0, Math.min(box.originX + box.width, obj.originX + obj.width) - Math.max(box.originX, obj.originX));
-      const yOverlap = Math.max(0, Math.min(box.originY + box.height, obj.originY + obj.height) - Math.max(box.originY, obj.originY));
-      const overlapArea = xOverlap * yOverlap;
-      const objArea = obj.width * obj.height;
-
-      if (overlapArea / objArea > 0.4) {
-        found.push(idx);
-      }
-    });
-    setCandidates(found);
-    setRefinementIndex(null);
-  }, [detections]);
-
-  const currentSelectionLabel = manualBox 
-    ? (refinementIndex !== null ? detections[refinementIndex].label : 'Область') 
-    : (selectedIndex !== null ? detections[selectedIndex].label : null);
+  const currentSelectionLabel = manualRegions.length > 0 
+    ? (manualRegions.length === 1 ? manualRegions[0].name : `${manualRegions.length} областей`)
+    : (selectedIndex !== null ? detections[selectedIndex]?.label : null);
 
   return (
     <div className="flex flex-col h-full bg-[#070709] text-slate-100 overflow-hidden font-sans">
@@ -403,20 +412,15 @@ export default function App() {
                         media={activeMedia} 
                         detections={detections} 
                         selectedIndex={selectedIndex}
-                        manualBox={manualBox}
-                        candidates={candidates}
-                        refinementIndex={refinementIndex}
+                        regions={manualRegions}
+                        selectedRegionId={selectedRegionId}
                         onSelect={(idx) => {
                           setSelectedIndex(idx);
-                          setManualBox(null);
-                          setCandidates([]);
-                          setRefinementIndex(null);
+                          setSelectedRegionId(null);
                         }}
-                        onManualSelect={(box) => {
-                          setManualBox(box);
-                          setSelectedIndex(null);
-                          if (box) findCandidates(box);
-                        }}
+                        onAddRegion={handleAddRegion}
+                        onDeleteRegion={handleDeleteRegion}
+                        onSelectRegion={setSelectedRegionId}
                         isProcessing={isProcessing}
                       />
                     </div>
@@ -484,20 +488,15 @@ export default function App() {
                   media={activeMedia} 
                   detections={detections} 
                   selectedIndex={selectedIndex}
-                  manualBox={manualBox}
-                  candidates={candidates}
-                  refinementIndex={refinementIndex}
+                  regions={manualRegions}
+                  selectedRegionId={selectedRegionId}
                   onSelect={(idx) => {
                     setSelectedIndex(idx);
-                    setManualBox(null);
-                    setCandidates([]);
-                    setRefinementIndex(null);
+                    setSelectedRegionId(null);
                   }}
-                  onManualSelect={(box) => {
-                    setManualBox(box);
-                    setSelectedIndex(null);
-                    if (box) findCandidates(box);
-                  }}
+                  onAddRegion={handleAddRegion}
+                  onDeleteRegion={handleDeleteRegion}
+                  onSelectRegion={setSelectedRegionId}
                   isProcessing={isProcessing}
                 />
                 <div className="flex gap-4">
@@ -508,12 +507,12 @@ export default function App() {
                     <span className="material-symbols-outlined text-sm transition-transform group-hover:rotate-180">cached</span>
                     <span>Загрузить другое</span>
                   </button>
-                  {(selectedIndex !== null || manualBox) && (
+                  {(selectedIndex !== null || manualRegions.length > 0) && (
                     <button 
-                      onClick={() => { setSelectedIndex(null); setManualBox(null); setCandidates([]); setRefinementIndex(null); }}
+                      onClick={() => { setSelectedIndex(null); setManualRegions([]); setSelectedRegionId(null); setCandidates([]); setRefinementIndex(null); }}
                       className="px-4 py-2 rounded-full bg-red-500/10 border border-red-500/20 text-[10px] uppercase font-black tracking-widest text-red-400 hover:bg-red-500/20 transition-all cursor-pointer whitespace-nowrap"
                     >
-                      <span>Сбросить выбор</span>
+                      <span>Сбросить все области</span>
                     </button>
                   )}
                 </div>
@@ -553,6 +552,10 @@ export default function App() {
               isProcessing={isProcessing || isDetectorLoading}
               selectedModel={editorModel}
               onSelectModel={setEditorModel}
+              regions={manualRegions}
+              onDeleteRegion={handleDeleteRegion}
+              onSelectRegion={setSelectedRegionId}
+              selectedRegionId={selectedRegionId}
               error={error || detectorError}
             />
           </div>

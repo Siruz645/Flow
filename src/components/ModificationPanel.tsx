@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
+import { RegionItem } from './MagicInspector';
 
 interface Candidate {
   index: number;
@@ -14,6 +15,10 @@ interface Props {
   isProcessing: boolean;
   selectedModel: string;
   onSelectModel: (model: string) => void;
+  regions: RegionItem[];
+  onDeleteRegion: (id: string) => void;
+  onSelectRegion: (id: string | null) => void;
+  selectedRegionId: string | null;
   error: string | null;
 }
 
@@ -26,17 +31,103 @@ export function ModificationPanel({
   isProcessing, 
   selectedModel,
   onSelectModel,
+  regions,
+  onDeleteRegion,
+  onSelectRegion,
+  selectedRegionId,
   error 
 }: Props) {
   const [prompt, setPrompt] = useState('');
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Mention dropdown state
+  const [showMentions, setShowMentions] = useState(false);
+  const [mentionFilter, setMentionFilter] = useState('');
+  const [mentionIndex, setMentionIndex] = useState(0);
+
+  // List of available mention options
+  const mentionOptions = [
+    ...regions.map(r => ({ tag: `@${r.name}`, label: r.name, type: 'region', id: r.id })),
+    ...(selectedElement ? [{ tag: `@${selectedElement}`, label: selectedElement, type: 'object', id: 'obj' }] : [])
+  ];
+
+  const filteredMentions = mentionOptions.filter(m => 
+    m.tag.toLowerCase().includes(mentionFilter.toLowerCase())
+  );
+
+  // Check for "@" trigger on text change or cursor move
+  const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const val = e.target.value;
+    const cursorPos = e.target.selectionStart;
+    setPrompt(val);
+
+    // Look back from cursor to see if user is typing an @mention
+    const textBeforeCursor = val.slice(0, cursorPos);
+    const atIndex = textBeforeCursor.lastIndexOf('@');
+
+    if (atIndex !== -1 && atIndex >= cursorPos - 20) {
+      const query = textBeforeCursor.slice(atIndex);
+      // Check if there is a space after @
+      if (!query.includes(' ') && !query.includes('\n')) {
+        setMentionFilter(query);
+        setShowMentions(true);
+        setMentionIndex(0);
+        return;
+      }
+    }
+    setShowMentions(false);
+  };
+
+  const insertMention = (tag: string) => {
+    if (!textareaRef.current) return;
+    const cursorPos = textareaRef.current.selectionStart;
+    const textBeforeCursor = prompt.slice(0, cursorPos);
+    const textAfterCursor = prompt.slice(cursorPos);
+    const atIndex = textBeforeCursor.lastIndexOf('@');
+
+    let newText = prompt;
+    if (atIndex !== -1 && showMentions) {
+      newText = textBeforeCursor.slice(0, atIndex) + `${tag} ` + textAfterCursor;
+    } else {
+      // Direct chip click insertion
+      newText = textBeforeCursor + `${tag} ` + textAfterCursor;
+    }
+
+    setPrompt(newText);
+    setShowMentions(false);
+
+    // Refocus textarea after insertion
+    setTimeout(() => {
+      if (textareaRef.current) {
+        textareaRef.current.focus();
+        const nextPos = (atIndex !== -1 && showMentions ? atIndex : cursorPos) + tag.length + 1;
+        textareaRef.current.setSelectionRange(nextPos, nextPos);
+      }
+    }, 50);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (showMentions && filteredMentions.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setMentionIndex(prev => (prev + 1) % filteredMentions.length);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setMentionIndex(prev => (prev - 1 + filteredMentions.length) % filteredMentions.length);
+      } else if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        insertMention(filteredMentions[mentionIndex].tag);
+      } else if (e.key === 'Escape') {
+        setShowMentions(false);
+      }
+    }
+  };
 
   const handleSubmit = () => {
     if (prompt.trim()) {
       onModify(prompt);
     }
   };
-
-  const isManual = selectedElement?.includes('Область') || refinementIndex !== null;
 
   return (
     <div className="flex flex-col h-full p-6 overflow-y-auto custom-scrollbar space-y-6">
@@ -48,54 +139,64 @@ export function ModificationPanel({
         </h2>
         <div className="flex items-center gap-2">
           <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-[8px] font-black uppercase tracking-widest whitespace-nowrap">
-            Smart Select
+            Multi-Select
           </span>
           <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest whitespace-nowrap">
-            Точечное редактирование
+            Области & @-Упоминания
           </p>
         </div>
       </div>
 
-      {/* Target Element Display */}
+      {/* Active Regions & Target Management */}
       <div className="space-y-2">
         <div className="flex items-center justify-between px-1">
-          <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">
-            Выбранная область
+          <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+            Выделенные области ({regions.length})
           </span>
-          {selectedElement && (
-            <div className="flex items-center gap-1.5">
-              <span className={`text-[9px] font-bold uppercase ${isManual ? 'text-emerald-400' : 'text-violet-400'}`}>
-                Активно
-              </span>
-              <span className={`flex h-2 w-2 rounded-full ${isManual ? 'bg-emerald-500 shadow-[0_0_10px_#10b981]' : 'bg-violet-500 shadow-[0_0_10px_#8b5cf6]'}`} />
-            </div>
+          {regions.length > 0 && (
+            <span className="text-[9px] text-emerald-400 font-mono font-bold">
+              Вставляйте через @ в текст
+            </span>
           )}
         </div>
-        
-        <div className={`p-4 rounded-2xl border transition-all duration-300 relative overflow-hidden group
-          ${selectedElement 
-            ? isManual ? 'bg-emerald-600/10 border-emerald-500/40' : 'bg-violet-600/10 border-violet-500/40'
-            : 'bg-zinc-900/50 border-white/5'}`}>
-          
-          <div className="flex items-center gap-3">
-            <div className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-300
-              ${selectedElement ? (isManual ? 'bg-emerald-500 shadow-emerald-500/20' : 'bg-violet-500 shadow-violet-500/20') + ' text-white shadow-lg' : 'bg-zinc-800 text-slate-500'}`}>
-              <span className="material-symbols-outlined text-xl">
-                {isManual ? 'frame_inspect' : (selectedElement ? 'adjust' : 'image')}
-              </span>
-            </div>
-            <div className="flex flex-col min-w-0 flex-1">
-              <span className={`text-xs font-black tracking-tight truncate ${selectedElement ? 'text-white' : 'text-slate-400'}`}>
-                {selectedElement || 'Весь кадр'}
-              </span>
-              <span className="text-[9px] text-slate-500 font-bold uppercase tracking-wider">
-                {isManual ? 'Ручная область' : (selectedElement ? 'Обнаруженный объект' : 'Глобальный фокус')}
-              </span>
-            </div>
-          </div>
-        </div>
 
-        {/* Candidates Resolution */}
+        {/* Region Chips List */}
+        {regions.length > 0 ? (
+          <div className="flex flex-wrap gap-2 p-3 bg-zinc-900/80 rounded-2xl border border-white/5">
+            {regions.map((reg) => (
+              <div
+                key={reg.id}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-bold transition-all border cursor-pointer select-none ${
+                  selectedRegionId === reg.id
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/50 shadow-md shadow-amber-500/10'
+                    : 'bg-[#181824] text-slate-300 border-white/10 hover:border-amber-400/40 hover:text-white'
+                }`}
+                onClick={() => insertMention(`@${reg.name}`)}
+                title="Нажмите, чтобы вставить в промпт"
+              >
+                <span className="text-[10px] text-amber-400">@</span>
+                <span>{reg.name}</span>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDeleteRegion(reg.id);
+                  }}
+                  title="Удалить область"
+                  className="hover:bg-red-500/30 text-slate-400 hover:text-red-300 rounded-full w-4 h-4 flex items-center justify-center text-[10px] transition-colors ml-0.5"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="p-3.5 rounded-2xl border border-dashed border-white/10 bg-zinc-900/30 text-center">
+            <p className="text-xs text-slate-400">Нарисуйте рамку на картинке слева,</p>
+            <p className="text-[10px] text-slate-500 mt-0.5">чтобы создать @Область 1, @Область 2 и т.д.</p>
+          </div>
+        )}
+
+        {/* Candidates Resolution if any */}
         {candidates.length > 0 && (
           <div className="space-y-2 p-3 bg-zinc-900/70 rounded-xl border border-white/5 animate-in slide-in-from-top-2">
             <p className="text-[9px] font-black text-slate-400 uppercase tracking-wider">Объекты в зоне:</p>
@@ -162,19 +263,62 @@ export function ModificationPanel({
         </div>
       </div>
 
-      {/* Prompt Input */}
-      <div className="space-y-2">
-        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">
-          Что изменить?
-        </span>
-        <textarea
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          placeholder={selectedElement ? `Напишите, что сделать с ${selectedElement}... (например: «замени на белую лошадь»)` : "Опишите изменения для изображения..."}
-          className="w-full h-28 bg-zinc-900 border border-white/10 rounded-2xl p-4 text-xs font-medium focus:outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-500 transition-all resize-none placeholder:text-zinc-600 text-white leading-relaxed"
-        />
+      {/* Prompt Input with @-Mention Autocomplete */}
+      <div className="space-y-2 relative">
+        <div className="flex items-center justify-between px-1">
+          <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+            Что изменить? (Введите @ для тега)
+          </span>
+          <span className="text-[9px] text-slate-500 font-mono">Нажмите @</span>
+        </div>
+
+        <div className="relative">
+          <textarea
+            ref={textareaRef}
+            value={prompt}
+            onChange={handleTextChange}
+            onKeyDown={handleKeyDown}
+            placeholder="Опишите правки, например: «В @Область 1 сделай белую лошадь, а в @Область 2 добавь закатное солнце»"
+            rows={4}
+            className="w-full bg-zinc-900 border border-white/10 rounded-2xl p-4 text-xs font-medium focus:outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-500 transition-all resize-none placeholder:text-zinc-600 text-white leading-relaxed"
+          />
+
+          {/* Autocomplete Popup */}
+          {showMentions && filteredMentions.length > 0 && (
+            <div className="absolute bottom-full left-0 mb-2 w-full bg-[#13131c] border border-violet-500/40 rounded-xl shadow-2xl overflow-hidden z-50 animate-in fade-in slide-in-from-bottom-2 duration-150">
+              <div className="p-2 border-b border-white/5 bg-[#0e0e15] flex items-center justify-between">
+                <span className="text-[9px] font-black uppercase tracking-wider text-violet-400">
+                  Выберите область (Enter/Tab)
+                </span>
+                <span className="text-[9px] text-slate-500 font-mono">↑↓ навигация</span>
+              </div>
+              <div className="max-h-40 overflow-y-auto p-1 space-y-0.5">
+                {filteredMentions.map((m, idx) => (
+                  <button
+                    key={idx}
+                    onClick={() => insertMention(m.tag)}
+                    className={`w-full text-left px-3 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-between cursor-pointer ${
+                      idx === mentionIndex
+                        ? 'bg-violet-600 text-white shadow-sm'
+                        : 'text-slate-300 hover:bg-white/5'
+                    }`}
+                  >
+                    <span className="flex items-center gap-2">
+                      <span className="text-amber-400">@</span>
+                      <span>{m.label}</span>
+                    </span>
+                    <span className="text-[9px] opacity-60 uppercase font-mono">
+                      {m.type === 'region' ? 'Область' : 'Объект'}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
         <p className="text-[10px] text-slate-500 italic px-1">
-          Совет: Уточняйте детали, цвет и форму для максимального соответствия.
+          Совет: Упоминайте <span className="text-amber-400 font-bold">@Область 1</span> прямо в тексте — ИИ сопоставит координаты с вашим описанием.
         </p>
       </div>
 
