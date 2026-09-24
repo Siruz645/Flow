@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef } from 'react';
 import { RegionItem } from './MagicInspector';
 
 interface Candidate {
@@ -19,6 +19,8 @@ interface Props {
   onDeleteRegion: (id: string) => void;
   onSelectRegion: (id: string | null) => void;
   selectedRegionId: string | null;
+  inpaintingMode: 'mask_strict' | 'focus_guide';
+  onSelectInpaintingMode: (mode: 'mask_strict' | 'focus_guide') => void;
   error: string | null;
 }
 
@@ -35,6 +37,8 @@ export function ModificationPanel({
   onDeleteRegion,
   onSelectRegion,
   selectedRegionId,
+  inpaintingMode,
+  onSelectInpaintingMode,
   error 
 }: Props) {
   const [prompt, setPrompt] = useState('');
@@ -61,13 +65,11 @@ export function ModificationPanel({
     const cursorPos = e.target.selectionStart;
     setPrompt(val);
 
-    // Look back from cursor to see if user is typing an @mention
     const textBeforeCursor = val.slice(0, cursorPos);
     const atIndex = textBeforeCursor.lastIndexOf('@');
 
     if (atIndex !== -1 && atIndex >= cursorPos - 20) {
       const query = textBeforeCursor.slice(atIndex);
-      // Check if there is a space after @
       if (!query.includes(' ') && !query.includes('\n')) {
         setMentionFilter(query);
         setShowMentions(true);
@@ -89,14 +91,12 @@ export function ModificationPanel({
     if (atIndex !== -1 && showMentions) {
       newText = textBeforeCursor.slice(0, atIndex) + `${tag} ` + textAfterCursor;
     } else {
-      // Direct chip click insertion
       newText = textBeforeCursor + `${tag} ` + textAfterCursor;
     }
 
     setPrompt(newText);
     setShowMentions(false);
 
-    // Refocus textarea after insertion
     setTimeout(() => {
       if (textareaRef.current) {
         textareaRef.current.focus();
@@ -139,11 +139,65 @@ export function ModificationPanel({
         </h2>
         <div className="flex items-center gap-2">
           <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-[8px] font-black uppercase tracking-widest whitespace-nowrap">
-            Multi-Select
+            {inpaintingMode === 'mask_strict' ? 'Strict Inpainting' : 'AI Attention'}
           </span>
           <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest whitespace-nowrap">
-            Области & @-Упоминания
+            Точечное редактирование
           </p>
+        </div>
+      </div>
+
+      {/* Inpainting Mode Selector (Strict Mask vs Focus of Attention) */}
+      <div className="space-y-2">
+        <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 flex items-center justify-between">
+          <span>Режим применения маски</span>
+          <span className="text-[9px] text-violet-400 font-mono font-normal">
+            {inpaintingMode === 'mask_strict' ? '100% изоляция фона' : 'Свободный ИИ'}
+          </span>
+        </label>
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            onClick={() => onSelectInpaintingMode('mask_strict')}
+            className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between ${
+              inpaintingMode === 'mask_strict'
+                ? 'bg-violet-600/20 border-violet-500 text-white shadow-md shadow-violet-600/15 ring-1 ring-violet-500/40'
+                : 'bg-zinc-900/60 border-zinc-800 text-slate-400 hover:text-white hover:border-zinc-700'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-1">
+              <span className="text-xs font-bold flex items-center gap-1.5 text-white">
+                <span>🎯</span>
+                <span>Строго по маске</span>
+              </span>
+              {inpaintingMode === 'mask_strict' && (
+                <span className="text-[8px] font-bold px-1.5 py-0.2 rounded bg-violet-500 text-white">
+                  Авто
+                </span>
+              )}
+            </div>
+            <p className="text-[9px] text-slate-400 mt-1.5 leading-snug">
+              Меняется <span className="text-violet-300 font-bold">только</span> внутри выделения, остальной кадр 100% нетронут.
+            </p>
+          </button>
+
+          <button
+            onClick={() => onSelectInpaintingMode('focus_guide')}
+            className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between ${
+              inpaintingMode === 'focus_guide'
+                ? 'bg-violet-600/20 border-violet-500 text-white shadow-md shadow-violet-600/15 ring-1 ring-violet-500/40'
+                : 'bg-zinc-900/60 border-zinc-800 text-slate-400 hover:text-white hover:border-zinc-700'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-1">
+              <span className="text-xs font-bold flex items-center gap-1.5 text-white">
+                <span>🧠</span>
+                <span>Фокус внимания</span>
+              </span>
+            </div>
+            <p className="text-[9px] text-slate-400 mt-1.5 leading-snug">
+              ИИ свободно перерисовывает кадр целиком с акцентом на выбранные области.
+            </p>
+          </button>
         </div>
       </div>
 
@@ -318,7 +372,7 @@ export function ModificationPanel({
         </div>
 
         <p className="text-[10px] text-slate-500 italic px-1">
-          Совет: Упоминайте <span className="text-amber-400 font-bold">@Область 1</span> прямо в тексте — ИИ сопоставит координаты с вашим описанием.
+          Совет: Упоминайте <span className="text-amber-400 font-bold">@Область 1</span> прямо в тексте для точечной привязки.
         </p>
       </div>
 

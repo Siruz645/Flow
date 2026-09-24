@@ -7,7 +7,7 @@ import { useObjectDetector } from './hooks/useObjectDetector';
 import { IntroModal } from './components/IntroModal';
 import { BasicGenerator } from './components/BasicGenerator';
 import { ImageToolboxGuide } from './components/ImageToolboxGuide';
-import { getFlowAspectRatio } from './services/ImageProcessor';
+import { getFlowAspectRatio, compositeMultiRegionEdit } from './services/ImageProcessor';
 
 export interface Box {
   originX: number;
@@ -38,6 +38,8 @@ export default function App() {
   const [activeHistoryIndex, setActiveHistoryIndex] = useState<number>(0);
   
   const [editorModel, setEditorModel] = useState<string>('Nano Banana 2');
+  const [inpaintingMode, setInpaintingMode] = useState<'mask_strict' | 'focus_guide'>('mask_strict');
+  
   const [mediaSize, setMediaSize] = useState<{width: number, height: number} | null>(null);
   const [detections, setDetections] = useState<Detection[]>([]);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
@@ -178,7 +180,6 @@ export default function App() {
   const handleDeleteRegion = (id: string) => {
     setManualRegions(prev => {
       const filtered = prev.filter(r => r.id !== id);
-      // Re-index so names are always cleanly sequenced (Область 1, Область 2, ...)
       return filtered.map((r, idx) => ({ ...r, name: `Область ${idx + 1}` }));
     });
     if (selectedRegionId === id) setSelectedRegionId(null);
@@ -247,10 +248,31 @@ export default function App() {
         throw new Error('Пустой ответ генератора Flow');
       }
 
+      let finalBase64 = generation.base64;
+
+      // In Strict Mask Mode: strictly blend only the modified regions into the original image
+      if (inpaintingMode === 'mask_strict' && manualRegions.length > 0) {
+        console.log('[App.tsx] 🎯 Applying Strict Multi-Region Mask Compositing...');
+        finalBase64 = await compositeMultiRegionEdit(
+          activeMedia.base64,
+          generation.base64,
+          manualRegions.map(r => r.box),
+          activeMedia.mimeType
+        );
+      } else if (inpaintingMode === 'mask_strict' && selectedIndex !== null && detections[selectedIndex]) {
+        console.log('[App.tsx] 🎯 Applying Strict Object Mask Compositing...');
+        finalBase64 = await compositeMultiRegionEdit(
+          activeMedia.base64,
+          generation.base64,
+          [detections[selectedIndex].boundingBox],
+          activeMedia.mimeType
+        );
+      }
+
       setResultImage({
-        base64: generation.base64,
-        mimeType: generation.mimeType || 'image/png',
-        mediaId: generation.mediaId || `edit-${crypto.randomUUID()}`,
+        base64: finalBase64,
+        mimeType: activeMedia.mimeType || 'image/png',
+        mediaId: `edit-${crypto.randomUUID()}`,
         name: `Результат: ${userPrompt.slice(0, 15)}...`,
         id: crypto.randomUUID()
       });
@@ -433,9 +455,14 @@ export default function App() {
                         <span className="w-2 h-2 rounded-full bg-emerald-400" />
                         2. Отредактированный результат
                       </span>
-                      <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30">
-                        {editorModel}
-                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-bold">
+                          {inpaintingMode === 'mask_strict' ? '🎯 Строго по маске' : '🧠 Фокус внимания'}
+                        </span>
+                        <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30">
+                          {editorModel}
+                        </span>
+                      </div>
                     </div>
                     <div className="flex-1 relative flex items-center justify-center overflow-hidden rounded-xl bg-black">
                       <img 
@@ -533,7 +560,7 @@ export default function App() {
                       {isDetectorLoading ? 'Анализ сцены...' : `Редактирование (${editorModel})`}
                     </p>
                     <p className="text-violet-500/60 text-[10px] font-mono uppercase font-bold tracking-widest">
-                      Flow Generative Inpainting...
+                      {inpaintingMode === 'mask_strict' ? 'Strict Mask Inpainting...' : 'Generative Inpainting...'}
                     </p>
                   </div>
                 </div>
@@ -556,6 +583,8 @@ export default function App() {
               onDeleteRegion={handleDeleteRegion}
               onSelectRegion={setSelectedRegionId}
               selectedRegionId={selectedRegionId}
+              inpaintingMode={inpaintingMode}
+              onSelectInpaintingMode={setInpaintingMode}
               error={error || detectorError}
             />
           </div>
