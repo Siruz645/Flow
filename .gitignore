@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Python / Cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# AI Agent memory & internal logs
+.agents/
+.gemini/
+.system_generated/
+WORKLOG.md
+CHANGELOG.md
+feature_spec_*.md
+bridge_spec.md
+*.log
+
+# Generated output images & temporary test files
+output*.png
+flow_generated_*.png
+temp/
+scratch/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# IDE / OS metadata
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

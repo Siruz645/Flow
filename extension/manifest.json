@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Google Flow Live Sync & Bridge",
+  "version": "2.1.0",
+  "description": "Live sync and image generation bridge between Google Flow and local PC",
+  "permissions": [
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://flow.google.com/*",
+    "https://*.google.com/*",
+    "https://*.scf.usercontent.goog/*",
+    "https://*.usercontent.goog/*",
+    "http://127.0.0.1:3210/*",
+    "http://localhost:3210/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://flow.google.com/*",
+        "https://*.flow.google.com/*",
+        "https://*.scf.usercontent.goog/*",
+        "https://*.usercontent.goog/*"
+      ],
+      "js": ["content.js"],
+      "all_frames": true,
+      "run_at": "document_start"
+    }
+  ]
+}
