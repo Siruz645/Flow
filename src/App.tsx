@@ -7,6 +7,8 @@ import { useObjectDetector } from './hooks/useObjectDetector';
 import { IntroModal } from './components/IntroModal';
 import { BasicGenerator } from './components/BasicGenerator';
 import { ImageToolboxGuide } from './components/ImageToolboxGuide';
+import { StyleModal, RegionStyle } from './components/StyleModal';
+import { VideoStudio } from './components/VideoStudio';
 import { getFlowAspectRatio, compositeMultiRegionEdit } from './services/ImageProcessor';
 
 export interface Box {
@@ -31,11 +33,16 @@ export interface HistoryItem {
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'basic' | 'editor'>('basic');
+  const [activeTab, setActiveTab] = useState<'basic' | 'editor' | 'video'>('basic');
   const [isGuideOpen, setIsGuideOpen] = useState(false);
   const [guidedPreset, setGuidedPreset] = useState<{ prompt: string; model: string; aspect: string } | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [activeHistoryIndex, setActiveHistoryIndex] = useState<number>(0);
+  
+  // Video Studio Bridge State
+  const [videoStudioFirstFrame, setVideoStudioFirstFrame] = useState<string | null>(null);
+  const [videoStudioLastFrame, setVideoStudioLastFrame] = useState<string | null>(null);
+  const [videoStudioPrompt, setVideoStudioPrompt] = useState<string>('');
   
   const [editorModel, setEditorModel] = useState<string>('Nano Banana 2');
   const [inpaintingMode, setInpaintingMode] = useState<'mask_strict' | 'focus_guide'>('mask_strict');
@@ -47,6 +54,10 @@ export default function App() {
   // Multi-Region Selection State
   const [manualRegions, setManualRegions] = useState<RegionItem[]>([]);
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
+
+  // Region Style Modal State
+  const [isStyleModalOpen, setIsStyleModalOpen] = useState(false);
+  const [styleTargetRegionId, setStyleTargetRegionId] = useState<string | null>(null);
 
   const [candidates, setCandidates] = useState<number[]>([]); 
   const [refinementIndex, setRefinementIndex] = useState<number | null>(null); 
@@ -93,6 +104,64 @@ export default function App() {
             id,
             status: 'error',
             error: err.message || 'Generation error in Flow iframe'
+          }, '*');
+        }
+      }
+
+      if (event.data && event.data.type === 'FLOW_BRIDGE_GENERATE_VIDEO') {
+        const { id, prompt, modelDisplayName, firstFrameBase64, firstFrameMimeType, lastFrameBase64, lastFrameMimeType, aspectRatio, durationSeconds, resolution } = event.data;
+        console.log('[App.tsx] 🎬 Received FLOW_BRIDGE_GENERATE_VIDEO request:', prompt);
+        try {
+          let firstFrameImageMediaId: string | undefined;
+          let lastFrameImageMediaId: string | undefined;
+
+          if (firstFrameBase64) {
+            const up1 = await Flow.upload({
+              base64: firstFrameBase64,
+              mimeType: (firstFrameMimeType || 'image/png') as any,
+              name: 'first_frame.png'
+            });
+            firstFrameImageMediaId = up1?.mediaId;
+          }
+
+          if (lastFrameBase64) {
+            const up2 = await Flow.upload({
+              base64: lastFrameBase64,
+              mimeType: (lastFrameMimeType || 'image/png') as any,
+              name: 'last_frame.png'
+            });
+            lastFrameImageMediaId = up2?.mediaId;
+          }
+
+          const videoPayload: any = {
+            prompt: prompt || 'Cinematic movement',
+            firstFrameImageMediaId,
+            lastFrameImageMediaId,
+            aspectRatio: aspectRatio || '16:9',
+            durationSeconds: durationSeconds ?? 5,
+            resolution: resolution || '720p'
+          };
+          if (modelDisplayName && modelDisplayName !== 'Omni 1.1 Flash') {
+            videoPayload.modelDisplayName = modelDisplayName;
+          }
+
+          const gen = await Flow.generate.video(videoPayload);
+
+          window.parent.postMessage({
+            type: 'FLOW_BRIDGE_GENERATE_RESULT',
+            id,
+            status: 'success',
+            mediaId: gen.mediaId,
+            base64: gen.base64,
+            mimeType: gen.mimeType || 'video/mp4'
+          }, '*');
+        } catch (err: any) {
+          console.error('[App.tsx] ❌ Video generation failed:', err);
+          window.parent.postMessage({
+            type: 'FLOW_BRIDGE_GENERATE_RESULT',
+            id,
+            status: 'error',
+            error: err.message || 'Video generation error in Flow iframe'
           }, '*');
         }
       }
@@ -166,6 +235,20 @@ export default function App() {
     setError(null);
   };
 
+  const handleAnimateFrame = (frameBase64: string, promptText?: string) => {
+    setVideoStudioFirstFrame(frameBase64);
+    setVideoStudioLastFrame(null);
+    if (promptText) setVideoStudioPrompt(promptText);
+    setActiveTab('video');
+  };
+
+  const handleMorphFrames = (firstBase64: string, lastBase64: string, promptText?: string) => {
+    setVideoStudioFirstFrame(firstBase64);
+    setVideoStudioLastFrame(lastBase64);
+    if (promptText) setVideoStudioPrompt(promptText);
+    setActiveTab('video');
+  };
+
   const handleAddRegion = (box: Box) => {
     const nextIndex = manualRegions.length + 1;
     const newRegion: RegionItem = {
@@ -213,6 +296,18 @@ export default function App() {
     }
   };
 
+  const handleOpenStyleModal = (region: RegionItem) => {
+    setStyleTargetRegionId(region.id);
+    setIsStyleModalOpen(true);
+  };
+
+  const handleSaveRegionStyle = (style: RegionStyle | null) => {
+    if (!styleTargetRegionId) return;
+    setManualRegions(prev => prev.map(r => r.id === styleTargetRegionId ? { ...r, style } : r));
+    setIsStyleModalOpen(false);
+    setStyleTargetRegionId(null);
+  };
+
   const compileFlowInpaintingPrompt = (
     userPrompt: string,
     manualRegions: RegionItem[],
@@ -235,19 +330,39 @@ export default function App() {
         const hName = cX < 33 ? 'left' : cX > 66 ? 'right' : 'horizontal center';
         const vName = cY < 33 ? 'upper' : cY > 66 ? 'lower' : 'vertical middle';
 
+        let styleDescriptor = '';
+        if (r.style) {
+          const specs: string[] = [];
+          if (r.style.name) specs.push(`Art Style: "${r.style.name}"`);
+          if (r.style.flow_prompt_directive) specs.push(`Artistic Directive: ${r.style.flow_prompt_directive}`);
+          if (r.style.art_style_manner) specs.push(`Visual Drawing Manner: ${r.style.art_style_manner}`);
+          if (r.style.rendering_technique) specs.push(`Rendering Technique & Shaders: ${r.style.rendering_technique}`);
+          if (r.style.lighting_schema) specs.push(`Lighting Schema: ${r.style.lighting_schema}`);
+          else if (r.style.lighting) specs.push(`Lighting: ${r.style.lighting}`);
+          if (r.style.palette && r.style.palette.length > 0) specs.push(`Color Palette: ${r.style.palette.join(', ')}`);
+          if (r.style.description && !r.style.flow_prompt_directive) specs.push(`Details: ${r.style.description}`);
+
+          styleDescriptor = ` [ARTISTIC STYLE TRANSFER: Re-render the visual appearance, shading, and drawing manner of this target strictly in ${specs.join(' | ')}. Apply this artistic rendering medium, lighting, and palette directly onto the target object while preserving the user's intended subject]`;
+        }
+
         // Replace tag in user text
         expandedPrompt = expandedPrompt.replaceAll(
           `@${r.name}`,
-          `[Target '${r.name}' at coordinates X:${cX}%, Y:${cY}%]`
+          `[Target '${r.name}' at coordinates X:${cX}%, Y:${cY}%${styleDescriptor}]`
         );
 
-        return `'${r.name}' anchor: center at (X:${cX}%, Y:${cY}%), box [X:${left}%-${left + width}%, Y:${top}%-${top + height}%], ${vName}-${hName} area`;
+        return `'${r.name}' anchor: center at (X:${cX}%, Y:${cY}%), box [X:${left}%-${left + width}%, Y:${top}%-${top + height}%], ${vName}-${hName} area${styleDescriptor}`;
       }).join('; ');
 
+      const hasStyles = manualRegions.some(r => r.style);
+      const styleDirective = hasStyles 
+        ? "MANDATORY ARTISTIC STYLE TRANSFER: For each target region with a specified style, repaint and shade its surface strictly in the requested artistic rendering medium, shader aesthetic, lighting, and color palette. DO NOT import subjects, clothes, or anatomy from the style reference."
+        : "";
+
       if (inpaintingMode === 'focus_guide') {
-        return `CRITICAL SPATIAL INSTRUCTION: Place and anchor the requested modification EXACTLY at the designated target region coordinates (${regionAnchors}). DO NOT move, displace, or relocate the primary subject/text/modification to other parts of the image. You are allowed and encouraged to naturally adapt the local surface geometry, reflections, lighting, and ambient surrounding environment around this anchor point to seamlessly integrate the modification into the scene. Modification instructions: ${expandedPrompt}. Ensure high-resolution photographic realism, matching camera perspective, and seamless blending.`;
+        return `CRITICAL SPATIAL & ART STYLE INSTRUCTION: Place and anchor the requested modification EXACTLY at the designated target region coordinates (${regionAnchors}). ${styleDirective} DO NOT move or relocate the subject. Naturally adapt local lighting and reflections around the anchor point. Modification instructions: ${expandedPrompt}. Ensure high artistic fidelity and seamless blending.`;
       } else {
-        return `CONTEXTUAL INPAINTING INSTRUCTION: Carefully examine the entire reference image context (subject, clothing/material surface texture, curvature, shadows, and ambient lighting). Apply the requested modification (${expandedPrompt}) directly onto the existing surface/material at the target coordinates (${regionAnchors}). The modification must blend naturally with the surrounding texture, lighting direction, and material folds, making it look authentically part of the scene.`;
+        return `CONTEXTUAL INPAINTING & ART STYLE TRANSFER INSTRUCTION: Carefully examine the reference image context. Apply the requested modification (${expandedPrompt}) directly at the target coordinates (${regionAnchors}). ${styleDirective} The modified surface must authentically embody the specified artistic drawing manner, shader materials, and lighting direction.`;
       }
     }
 
@@ -259,15 +374,47 @@ export default function App() {
     return `Modify the image as instructed: ${expandedPrompt}. Maintain scene consistency, natural lighting, and photographic realism.`;
   };
 
+  const [processingStatus, setProcessingStatus] = useState<string | null>(null);
+
   const handleModify = async (userPrompt: string) => {
     if (!activeMedia || !mediaSize) return;
     setIsProcessing(true);
     setError(null);
+    setProcessingStatus(null);
+
     try {
+      let currentManualRegions = manualRegions;
+
+      // Smart Synchronization: Await any pending background AI Vision style analyses
+      const pendingStyleRegions = currentManualRegions.filter(r => r.style?.analysisPromise || r.style?.isAnalyzing);
+      if (pendingStyleRegions.length > 0) {
+        setProcessingStatus('Синхронизация: ожидание Flow AI анализа стиля...');
+        console.log('[App.tsx] ⏳ Waiting for pending style analysis promises to resolve before generation...');
+        const resolved = await Promise.all(
+          currentManualRegions.map(async (r) => {
+            if (r.style?.analysisPromise) {
+              try {
+                const styleResult = await r.style.analysisPromise;
+                if (styleResult) {
+                  return { ...r, style: { ...styleResult, isAnalyzing: false, analysisPromise: undefined } };
+                }
+              } catch (e) {
+                console.warn('[App.tsx] Failed to await style analysis:', e);
+              }
+            }
+            return r;
+          })
+        );
+        currentManualRegions = resolved;
+        setManualRegions(resolved);
+      }
+
+      setProcessingStatus(null);
+
       const aspect = getFlowAspectRatio(mediaSize.width, mediaSize.height);
       const promptToModel = compileFlowInpaintingPrompt(
         userPrompt,
-        manualRegions,
+        currentManualRegions,
         selectedIndex,
         detections,
         mediaSize,
@@ -292,12 +439,12 @@ export default function App() {
       let finalBase64 = generation.base64;
 
       // In Strict Mask Mode: strictly blend only the modified regions into the original image
-      if (inpaintingMode === 'mask_strict' && manualRegions.length > 0) {
+      if (inpaintingMode === 'mask_strict' && currentManualRegions.length > 0) {
         console.log('[App.tsx] 🎯 Applying Strict Multi-Region Mask Compositing...');
         finalBase64 = await compositeMultiRegionEdit(
           activeMedia.base64,
           generation.base64,
-          manualRegions.map(r => r.box),
+          currentManualRegions.map(r => r.box),
           activeMedia.mimeType
         );
       } else if (inpaintingMode === 'mask_strict' && selectedIndex !== null && detections[selectedIndex]) {
@@ -323,6 +470,7 @@ export default function App() {
       setError(err.message || 'Ошибка генерации. Попробуйте другой запрос.');
     } finally {
       setIsProcessing(false);
+      setProcessingStatus(null);
     }
   };
 
@@ -392,6 +540,17 @@ export default function App() {
             >
               <span>✨</span>
               <span>Редактор</span>
+            </button>
+            <button
+              onClick={() => setActiveTab('video')}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap flex-shrink-0 ${
+                activeTab === 'video'
+                  ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md shadow-purple-600/30'
+                  : 'text-slate-400 hover:text-purple-300'
+              }`}
+            >
+              <span>🎬</span>
+              <span>Видео (Omni)</span>
             </button>
           </div>
 
@@ -484,6 +643,7 @@ export default function App() {
                         onAddRegion={handleAddRegion}
                         onDeleteRegion={handleDeleteRegion}
                         onSelectRegion={setSelectedRegionId}
+                        onOpenStyleModal={handleOpenStyleModal}
                         isProcessing={isProcessing}
                       />
                     </div>
@@ -516,7 +676,7 @@ export default function App() {
                 </div>
 
                 {/* Bottom Result Action Bar (Single-Line Buttons) */}
-                <div className="flex items-center gap-3 w-full justify-between max-w-2xl bg-[#0e0e15] p-3 rounded-2xl border border-white/10 flex-shrink-0">
+                <div className="flex items-center gap-3 w-full justify-between max-w-4xl bg-[#0e0e15] p-3 rounded-2xl border border-white/10 flex-shrink-0">
                   <div className="flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_#10b981]" />
                     <span className="text-xs text-white font-bold truncate">
@@ -524,6 +684,24 @@ export default function App() {
                     </span>
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0">
+                    {/* Quick Morph Button: First frame = original, Last frame = result */}
+                    <button
+                      onClick={() => handleMorphFrames(activeMedia.base64, resultImage.base64, 'Smooth fluid transition morphing before into after, seamless metamorphosis')}
+                      className="px-3.5 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-md shadow-purple-600/20 active:scale-95 cursor-pointer whitespace-nowrap flex-shrink-0"
+                      title="Создать видео-морфинг перехода До ➔ После"
+                    >
+                      <span className="material-symbols-outlined text-sm">auto_videocam</span>
+                      <span>🌀 Морфинг (До ➔ После)</span>
+                    </button>
+                    {/* Quick Animate Result */}
+                    <button
+                      onClick={() => handleAnimateFrame(resultImage.base64, 'Cinematic animated movement, high fidelity, 4k')}
+                      className="px-3 py-2 bg-purple-950/60 hover:bg-purple-900/80 border border-purple-500/30 text-purple-200 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer whitespace-nowrap flex-shrink-0"
+                      title="Оживить отредактированный кадр в видео (Omni)"
+                    >
+                      <span className="material-symbols-outlined text-sm text-purple-400">movie</span>
+                      <span>🎬 Оживить</span>
+                    </button>
                     <button
                       onClick={handlePromoteResult}
                       className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-lg shadow-emerald-600/25 active:scale-95 cursor-pointer whitespace-nowrap flex-shrink-0"
@@ -565,9 +743,19 @@ export default function App() {
                   onAddRegion={handleAddRegion}
                   onDeleteRegion={handleDeleteRegion}
                   onSelectRegion={setSelectedRegionId}
+                  onOpenStyleModal={handleOpenStyleModal}
                   isProcessing={isProcessing}
                 />
                 <div className="flex gap-4">
+                  {activeMedia && (
+                    <button 
+                      onClick={() => handleAnimateFrame(activeMedia.base64, 'Cinematic living scene, natural camera movement, photorealistic, 4k')}
+                      className="px-4 py-2 rounded-full bg-gradient-to-r from-purple-600 to-indigo-600 text-white text-[10px] uppercase font-black tracking-widest hover:brightness-110 flex items-center gap-2 transition-all shadow-lg shadow-purple-600/25 active:scale-95 cursor-pointer whitespace-nowrap"
+                    >
+                      <span className="material-symbols-outlined text-sm">movie</span>
+                      <span>🎬 Оживить в видео (Omni)</span>
+                    </button>
+                  )}
                   <button 
                     onClick={handleMediaSelect}
                     className="group px-4 py-2 rounded-full bg-slate-900/50 border border-slate-800 text-[10px] uppercase font-black tracking-widest text-slate-400 hover:text-white flex items-center gap-2 transition-all hover:border-violet-500/50 cursor-pointer whitespace-nowrap"
@@ -598,10 +786,10 @@ export default function App() {
                   </div>
                   <div className="space-y-1 text-center">
                     <p className="text-xl font-black text-white animate-pulse uppercase tracking-[0.2em] italic">
-                      {isDetectorLoading ? 'Анализ сцены...' : `Редактирование (${editorModel})`}
+                      {processingStatus || (isDetectorLoading ? 'Анализ сцены...' : `Редактирование (${editorModel})`)}
                     </p>
                     <p className="text-violet-500/60 text-[10px] font-mono uppercase font-bold tracking-widest">
-                      {inpaintingMode === 'mask_strict' ? 'Strict Mask Inpainting...' : 'Generative Inpainting...'}
+                      {processingStatus ? 'Синхронизация стилей перед генерацией...' : (inpaintingMode === 'mask_strict' ? 'Strict Mask Inpainting...' : 'Generative Inpainting...')}
                     </p>
                   </div>
                 </div>
@@ -623,14 +811,40 @@ export default function App() {
               regions={manualRegions}
               onDeleteRegion={handleDeleteRegion}
               onSelectRegion={setSelectedRegionId}
+              onOpenStyleModal={handleOpenStyleModal}
               selectedRegionId={selectedRegionId}
               inpaintingMode={inpaintingMode}
               onSelectInpaintingMode={setInpaintingMode}
+              onAnimateToVideo={activeMedia ? () => handleAnimateFrame(activeMedia.base64) : undefined}
               error={error || detectorError}
             />
           </div>
         </main>
       </div>
+
+      {/* Tab 3: Video Studio (Omni 1.1 Flash / Veo 3.1) */}
+      <div className={`flex-1 flex overflow-hidden ${activeTab === 'video' ? '' : 'hidden'}`}>
+        <VideoStudio
+          initialFirstFrame={videoStudioFirstFrame}
+          initialLastFrame={videoStudioLastFrame}
+          initialPrompt={videoStudioPrompt}
+          onBackToEditor={() => setActiveTab('editor')}
+        />
+      </div>
+
+      {/* Style Configuration Modal */}
+      {isStyleModalOpen && (
+        <StyleModal 
+          isOpen={isStyleModalOpen}
+          onClose={() => {
+            setIsStyleModalOpen(false);
+            setStyleTargetRegionId(null);
+          }}
+          targetRegionName={manualRegions.find(r => r.id === styleTargetRegionId)?.name || 'Область'}
+          currentStyle={manualRegions.find(r => r.id === styleTargetRegionId)?.style}
+          onSaveStyle={handleSaveRegionStyle}
+        />
+      )}
 
       {/* Slide-over Guide Drawer */}
       <ImageToolboxGuide 

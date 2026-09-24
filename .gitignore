@@ -23,6 +23,8 @@ bridge_spec.md
 # Generated output images & temporary test files
 output*.png
 flow_generated_*.png
+*.mp4
+bridge/media_cache.json
 temp/
 scratch/
 

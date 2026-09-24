@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Google Flow Live Sync & Generation Bridge
 // @namespace    https://flow.google.com/
-// @version      2.1.0
-// @description  Двусторонняя синхронизация файлов и проброс генерации изображений между Google Flow и локальным ПК
+// @version      2.2.0
+// @description  Двусторонняя синхронизация файлов и проброс генерации изображений и видео между Google Flow и локальным ПК
 // @author       Antigravity
 // @match        *://flow.google.com/*
 // @match        *://*.flow.google.com/*
@@ -23,6 +23,7 @@
 // @run-at       document-start
 // ==/UserScript==
 
+// Google Flow Live Sync & Video/Image Generation Bridge v2.2.0
 (function () {
     'use strict';
 
@@ -38,42 +39,166 @@
     // 1. IFRAME CONTEXT (runs inside *.scf.usercontent.goog)
     // ----------------------------------------------------
     if (isIframe) {
-        // Listen for postMessage from Flow host
+        console.log('[FlowBridge:Iframe] Initialized in frame:', window.location.href, document.title);
+
+        async function getFlowSDK() {
+            let flowObj = window.Flow;
+            if (!flowObj || !flowObj.generate) {
+                try {
+                    const mod = await import('flow-sdk');
+                    flowObj = mod.Flow || mod.default || mod;
+                } catch (e) {
+                    console.warn('[FlowBridge:Iframe] import(flow-sdk) failed:', e);
+                }
+            }
+            if (!flowObj && window.parent && window.parent.Flow) {
+                flowObj = window.parent.Flow;
+            }
+            return flowObj;
+        }
+
         window.addEventListener('message', async (event) => {
-            if (event.data && event.data.type === 'FLOW_BRIDGE_GENERATE') {
-                const { id, prompt, aspectRatio, modelDisplayName } = event.data;
-                console.log(`[FlowRunnerIframe] Received generate request: "${prompt}"`);
+            if (!event.data || typeof event.data !== 'object') return;
+
+            // Probe handler
+            if (event.data.type === 'FLOW_BRIDGE_PROBE') {
+                const { id } = event.data;
+                const flowObj = await getFlowSDK();
+                const generateKeys = flowObj?.generate ? Object.keys(flowObj.generate) : [];
+                const flowKeys = flowObj ? Object.keys(flowObj) : [];
+
+                window.parent.postMessage({
+                    type: 'FLOW_BRIDGE_PROBE_RESULT',
+                    id: id,
+                    frameUrl: window.location.href,
+                    title: document.title,
+                    hasFlow: !!flowObj,
+                    flowKeys: flowKeys,
+                    generateKeys: generateKeys
+                }, '*');
+                return;
+            }
+
+            // Image generation handler
+            if (event.data.type === 'FLOW_BRIDGE_GENERATE') {
+                const { id, prompt, aspectRatio, modelDisplayName, referenceBase64, referenceMimeType } = event.data;
+                console.log(`[FlowBridge:Iframe] 🎨 Received image request [${id}]: "${prompt}"`);
 
                 try {
-                    // Check if Flow SDK is available in the iframe context
-                    const flowObj = window.Flow || (window.parent && window.parent.Flow);
+                    const flowObj = await getFlowSDK();
                     if (!flowObj || !flowObj.generate || !flowObj.generate.image) {
-                        throw new Error('Flow.generate.image недоступен в текущем контексте фрейма.');
+                        throw new Error('Flow.generate.image недоступен в рантайме текущего фрейма');
                     }
 
-                    const result = await flowObj.generate.image({
+                    const refIds = [];
+                    if (referenceBase64 && flowObj.upload) {
+                        console.log('[FlowBridge:Iframe] Uploading reference image...');
+                        const up = await flowObj.upload({
+                            base64: referenceBase64,
+                            mimeType: referenceMimeType || 'image/png',
+                            name: 'ref_image.png'
+                        });
+                        if (up?.mediaId) refIds.push(up.mediaId);
+                    }
+
+                    const opts = {
                         prompt: prompt,
                         aspectRatio: aspectRatio || '1:1',
                         modelDisplayName: modelDisplayName || '🍌 Nano Banana Pro'
-                    });
+                    };
+                    if (refIds.length > 0) opts.referenceImageMediaIds = refIds;
 
+                    const result = await flowObj.generate.image(opts);
                     window.parent.postMessage({
                         type: 'FLOW_BRIDGE_GENERATE_RESULT',
                         id: id,
                         status: 'success',
-                        mediaId: result.mediaId,
+                        mediaId: result.mediaId || result.id || `img-${Date.now()}`,
                         base64: result.base64,
                         mimeType: result.mimeType || 'image/png'
                     }, '*');
                 } catch (err) {
-                    console.error('[FlowRunnerIframe] Error:', err);
+                    console.error('[FlowBridge:Iframe] Image generation error:', err);
                     window.parent.postMessage({
                         type: 'FLOW_BRIDGE_GENERATE_RESULT',
                         id: id,
                         status: 'error',
-                        error: err.message
+                        error: err.message || String(err)
                     }, '*');
                 }
+                return;
+            }
+
+            // Video generation handler
+            if (event.data.type === 'FLOW_BRIDGE_GENERATE_VIDEO') {
+                const { id, prompt, modelDisplayName, firstFrameBase64, firstFrameMimeType, lastFrameBase64, lastFrameMimeType, aspectRatio, durationSeconds, resolution } = event.data;
+                console.log(`[FlowBridge:Iframe] 🎬 Received video request [${id}]: "${prompt}" (model: ${modelDisplayName})`);
+
+                try {
+                    const flowObj = await getFlowSDK();
+                    if (!flowObj || !flowObj.generate || !flowObj.generate.video) {
+                        throw new Error('Flow.generate.video недоступен в рантайме текущего фрейма');
+                    }
+
+                    let firstMediaId = undefined;
+                    let lastMediaId = undefined;
+
+                    if (firstFrameBase64 && flowObj.upload) {
+                        console.log('[FlowBridge:Iframe] Uploading first frame...');
+                        const up1 = await flowObj.upload({
+                            base64: firstFrameBase64,
+                            mimeType: firstFrameMimeType || 'image/png',
+                            name: 'first_frame.png'
+                        });
+                        firstMediaId = up1?.mediaId;
+                    }
+
+                    if (lastFrameBase64 && flowObj.upload) {
+                        console.log('[FlowBridge:Iframe] Uploading last frame for morphing...');
+                        const up2 = await flowObj.upload({
+                            base64: lastFrameBase64,
+                            mimeType: lastFrameMimeType || 'image/png',
+                            name: 'last_frame.png'
+                        });
+                        lastMediaId = up2?.mediaId;
+                    }
+
+                    const videoOpts = {
+                        prompt: prompt || 'Cinematic movement',
+                        aspectRatio: aspectRatio || '16:9',
+                        durationSeconds: durationSeconds || 5
+                    };
+                    if (modelDisplayName) videoOpts.modelDisplayName = modelDisplayName;
+                    if (firstMediaId) videoOpts.firstFrameImageMediaId = firstMediaId;
+                    if (lastMediaId) videoOpts.lastFrameImageMediaId = lastMediaId;
+                    if (resolution) videoOpts.resolution = resolution;
+
+                    console.log('[FlowBridge:Iframe] Invoking Flow.generate.video:', JSON.stringify(videoOpts));
+                    const result = await flowObj.generate.video(videoOpts);
+
+                    if (!result || !result.base64) {
+                        throw new Error('Flow.generate.video вернул пустой результат');
+                    }
+
+                    console.log(`[FlowBridge:Iframe] 🎉 Video generation succeeded! (${result.base64.length} chars b64)`);
+                    window.parent.postMessage({
+                        type: 'FLOW_BRIDGE_GENERATE_RESULT',
+                        id: id,
+                        status: 'success',
+                        mediaId: result.mediaId || result.id || `vid-${Date.now()}`,
+                        base64: result.base64,
+                        mimeType: result.mimeType || 'video/mp4'
+                    }, '*');
+                } catch (err) {
+                    console.error('[FlowBridge:Iframe] Video generation error:', err);
+                    window.parent.postMessage({
+                        type: 'FLOW_BRIDGE_GENERATE_RESULT',
+                        id: id,
+                        status: 'error',
+                        error: err.message || String(err)
+                    }, '*');
+                }
+                return;
             }
         });
         return;
@@ -91,6 +216,7 @@
     let isPulling = false;
     let lastGeneratedBase64 = null;
     const pendingGenerations = new Map();
+    const probeResponses = new Map();
 
     const CSS_STYLES = `
         #flow-sync-widget {
@@ -168,51 +294,46 @@
         .fs-status { font-size: 11px !important; color: #a0a0b8 !important; font-weight: 500 !important; }
         .fs-controls { display: flex !important; flex-direction: column !important; gap: 6px !important; }
         .fs-btn {
-            padding: 8px 10px !important;
+            padding: 7px 12px !important;
             border-radius: 6px !important;
-            border: none !important;
+            font-size: 12px !important;
             font-weight: 600 !important;
-            font-size: 11px !important;
             cursor: pointer !important;
+            border: none !important;
+            transition: all 0.2s ease !important;
             display: flex !important;
             align-items: center !important;
             justify-content: center !important;
             gap: 6px !important;
-            transition: all 0.15s !important;
         }
-        .fs-btn-primary { background: #6366f1 !important; color: #ffffff !important; }
-        .fs-btn-primary:hover { background: #4f46e5 !important; }
-        .fs-btn-secondary {
-            background: #232332 !important;
-            color: #e0e0e0 !important;
-            border: 1px solid #3d3d55 !important;
-        }
-        .fs-btn-secondary:hover { background: #2f2f44 !important; color: #fff !important; }
+        .fs-btn-primary { background: #4f46e5 !important; color: #fff !important; }
+        .fs-btn-primary:hover { background: #4338ca !important; }
+        .fs-btn-secondary { background: #272738 !important; color: #e2e8f0 !important; border: 1px solid #3f3f5a !important; }
+        .fs-btn-secondary:hover { background: #323248 !important; }
         .fs-switch {
             display: flex !important;
             align-items: center !important;
-            gap: 6px !important;
+            gap: 8px !important;
             font-size: 11px !important;
-            color: #ccc !important;
+            color: #cbd5e1 !important;
             cursor: pointer !important;
         }
+        .fs-switch input { cursor: pointer !important; accent-color: #4f46e5 !important; }
         .fs-log {
-            font-size: 10px !important;
-            color: #38bdf8 !important;
-            background: #09090e !important;
-            padding: 7px 9px !important;
+            background: #09090d !important;
+            border: 1px solid #232334 !important;
             border-radius: 6px !important;
-            border: 1px solid #222234 !important;
-            min-height: 22px !important;
-            word-break: break-all !important;
+            padding: 8px !important;
             font-family: monospace !important;
+            font-size: 10px !important;
+            color: #94a3b8 !important;
+            max-height: 80px !important;
+            overflow-y: auto !important;
+            word-break: break-all !important;
         }
     `;
 
     function applyStyles() {
-        if (typeof GM_addStyle === 'function') {
-            try { GM_addStyle(CSS_STYLES); return; } catch (e) {}
-        }
         if (!document.getElementById('flow-sync-styles')) {
             const style = document.createElement('style');
             style.id = 'flow-sync-styles';
@@ -240,12 +361,12 @@
 
         const title = document.createElement('span');
         title.className = 'fs-title';
-        title.textContent = 'Flow Bridge v2.1';
+        title.textContent = 'Flow Bridge v2.2';
         header.appendChild(title);
 
         const badge = document.createElement('span');
         badge.className = 'fs-badge';
-        badge.textContent = 'Live RPC';
+        badge.textContent = 'Video+RPC';
         header.appendChild(badge);
 
         const minBtn = document.createElement('button');
@@ -355,25 +476,43 @@
         if (statusText) statusText.textContent = text || (connected ? '🟢 Мост активен: RPC готов' : '🔴 Мост отключен');
     }
 
-    // Listen for response from iframe
+    // Listen for responses from iframes
     window.addEventListener('message', (event) => {
-        if (event.data && event.data.type === 'FLOW_BRIDGE_GENERATE_RESULT') {
+        if (!event.data || typeof event.data !== 'object') return;
+
+        // Generation result
+        if (event.data.type === 'FLOW_BRIDGE_GENERATE_RESULT') {
             const { id, status, base64, mimeType, mediaId, error } = event.data;
-            log(`Ответ от фрейма [${id}]: ${status}`);
+            log(`Ответ от фрейма [${id}]: ${status} (${mimeType || 'unknown'})`);
+
+            const genMeta = pendingGenerations.get(id);
+            const isVideo = (mimeType && mimeType.includes('video')) || (genMeta && genMeta.type === 'video');
+            const resEvent = isVideo ? 'generate_video_res' : 'generate_image_res';
+
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({
                     id: id,
-                    event: 'generate_image_res',
+                    event: resEvent,
                     status: status,
                     mediaId: mediaId,
                     base64: base64,
-                    mimeType: mimeType,
+                    mimeType: mimeType || (isVideo ? 'video/mp4' : 'image/png'),
                     error: error
                 }));
             }
-            if (pendingGenerations.has(id)) {
-                pendingGenerations.delete(id);
+            pendingGenerations.delete(id);
+            return;
+        }
+
+        // Probe result
+        if (event.data.type === 'FLOW_BRIDGE_PROBE_RESULT') {
+            const { id } = event.data;
+            console.log(`[FlowBridge] Probe response received from iframe [${id}]:`, event.data);
+            if (!probeResponses.has(id)) {
+                probeResponses.set(id, []);
             }
+            probeResponses.get(id).push(event.data);
+            return;
         }
     });
 
@@ -398,8 +537,16 @@
                         }
                     }
                     if (data.event === 'generate_image_req') {
-                        log(`🎨 Генерация: "${data.prompt.slice(0, 30)}..."`);
+                        log(`🎨 Генерация: "${data.prompt?.slice(0, 30)}..."`);
                         await handleGenerationRequest(data);
+                    }
+                    if (data.event === 'generate_video_req') {
+                        log(`🎬 Видео-генерация: "${data.prompt?.slice(0, 30)}..."`);
+                        await handleVideoGenerationRequest(data);
+                    }
+                    if (data.event === 'probe_flow_req') {
+                        log(`🔍 Диагностический опрос [${data.id}]...`);
+                        await handleProbeRequest(data);
                     }
                 } catch (e) {
                     console.error('[FlowBridge] WS parse error:', e);
@@ -418,40 +565,73 @@
         }
     }
 
+    async function handleProbeRequest(req) {
+        const { id } = req;
+        probeResponses.set(id, []);
+        const iframes = Array.from(document.querySelectorAll('iframe'));
+
+        log(`Опрос ${iframes.length} фреймов...`);
+        for (const ifr of iframes) {
+            try {
+                ifr.contentWindow?.postMessage({
+                    type: 'FLOW_BRIDGE_PROBE',
+                    id: id
+                }, '*');
+            } catch (e) {}
+        }
+
+        await new Promise(r => setTimeout(r, 1500));
+        const collected = probeResponses.get(id) || [];
+        probeResponses.delete(id);
+
+        const responsePayload = {
+            id: id,
+            event: 'probe_flow_res',
+            status: 'success',
+            hostUrl: window.location.href,
+            iframesCount: iframes.length,
+            probeResults: collected
+        };
+
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(responsePayload));
+        }
+    }
+
     async function handleGenerationRequest(req) {
-        const { id, prompt, aspectRatio, modelDisplayName } = req;
+        const { id, prompt, aspectRatio, modelDisplayName, referenceBase64, referenceMimeType } = req;
         log(`Исполнение запроса [${id}]...`);
+        pendingGenerations.set(id, { type: 'image', startTime: Date.now() });
 
         try {
-            // Priority 1: Send postMessage to runner iframe if present
-            const runnerIframe = document.querySelector('iframe[src*="scf.usercontent.goog"]') ||
-                                 document.querySelector('iframe[src*="flow-applet"]') ||
-                                 document.querySelector('iframe');
+            const allIframes = Array.from(document.querySelectorAll('iframe'));
+            if (allIframes.length > 0) {
+                log(`⚡ Запрос отправлен во фреймы Flow (${allIframes.length})...`);
+                for (const ifr of allIframes) {
+                    try {
+                        ifr.contentWindow?.postMessage({
+                            type: 'FLOW_BRIDGE_GENERATE',
+                            id: id,
+                            prompt: prompt,
+                            aspectRatio: aspectRatio || '1:1',
+                            modelDisplayName: modelDisplayName || '🍌 Nano Banana Pro',
+                            referenceBase64: referenceBase64,
+                            referenceMimeType: referenceMimeType
+                        }, '*');
+                    } catch (e) {}
+                }
 
-            if (runnerIframe && runnerIframe.contentWindow) {
-                log('⚡ Запрос отправлен в runner iframe...');
-                pendingGenerations.set(id, Date.now());
-                runnerIframe.contentWindow.postMessage({
-                    type: 'FLOW_BRIDGE_GENERATE',
-                    id: id,
-                    prompt: prompt,
-                    aspectRatio: aspectRatio || '1:1',
-                    modelDisplayName: modelDisplayName || '🍌 Nano Banana Pro'
-                }, '*');
-
-                // Wait up to 60s for postMessage response
                 const startTime = Date.now();
                 while (pendingGenerations.has(id) && Date.now() - startTime < 60000) {
                     await new Promise(r => setTimeout(r, 500));
                 }
 
                 if (!pendingGenerations.has(id)) {
-                    // Handled by message listener
                     return;
                 }
             }
 
-            // Priority 2: Fallback to Flow canvas / UI automation
+            // Priority 2: Fallback to Flow canvas / UI automation for images
             log('⚡ Попытка исполнения через UI Flow...');
             const imageResult = await automateFlowUIGeneration(prompt, aspectRatio);
 
@@ -476,6 +656,62 @@
                 status: 'error',
                 error: err.message
             }));
+        } finally {
+            pendingGenerations.delete(id);
+        }
+    }
+
+    async function handleVideoGenerationRequest(req) {
+        const { id, prompt, modelDisplayName, firstFrameBase64, firstFrameMimeType, lastFrameBase64, lastFrameMimeType, aspectRatio, durationSeconds, resolution } = req;
+        log(`Исполнение видео-запроса [${id}]...`);
+        pendingGenerations.set(id, { type: 'video', startTime: Date.now() });
+
+        try {
+            const allIframes = Array.from(document.querySelectorAll('iframe'));
+            if (allIframes.length === 0) {
+                throw new Error('Iframe приложения Flow не найден на странице. Откройте инструмент в Google Flow.');
+            }
+
+            log(`⚡ Видео-запрос направлен во фреймы Flow (${allIframes.length})...`);
+            for (const ifr of allIframes) {
+                try {
+                    ifr.contentWindow?.postMessage({
+                        type: 'FLOW_BRIDGE_GENERATE_VIDEO',
+                        id: id,
+                        prompt: prompt,
+                        modelDisplayName: modelDisplayName || 'Omni 1.1 Flash',
+                        firstFrameBase64: firstFrameBase64,
+                        firstFrameMimeType: firstFrameMimeType,
+                        lastFrameBase64: lastFrameBase64,
+                        lastFrameMimeType: lastFrameMimeType,
+                        aspectRatio: aspectRatio || '16:9',
+                        durationSeconds: durationSeconds || 5,
+                        resolution: resolution || '720p'
+                    }, '*');
+                } catch (e) {}
+            }
+
+            // Wait up to 210s for video generation in iframe
+            const startTime = Date.now();
+            while (pendingGenerations.has(id) && Date.now() - startTime < 210000) {
+                await new Promise(r => setTimeout(r, 500));
+            }
+
+            if (!pendingGenerations.has(id)) {
+                return;
+            }
+
+            throw new Error('Таймаут ожидания генерации видео в iframe (превышено 210 сек). Проверьте активность вкладки Flow.');
+        } catch (err) {
+            log(`❌ Ошибка видео: ${err.message}`);
+            ws.send(JSON.stringify({
+                id: id,
+                event: 'generate_video_res',
+                status: 'error',
+                error: err.message
+            }));
+        } finally {
+            pendingGenerations.delete(id);
         }
     }
 
@@ -525,10 +761,12 @@
             const currentImgs = Array.from(document.querySelectorAll('img'));
             for (const img of currentImgs) {
                 if (!initialImages.has(img.src) && img.src && (img.src.includes('googleusercontent.com') || img.src.startsWith('blob:') || img.src.startsWith('data:image'))) {
-                    log('Найдено новое изображение в DOM!');
-                    const base64 = await convertImgUrlToBase64(img.src);
-                    if (base64) {
-                        return { base64: base64, mimeType: 'image/png' };
+                    if (img.naturalWidth > 120 || img.width > 120 || img.src.includes('=s')) {
+                        log('Найдено новое изображение в DOM!');
+                        const base64 = await convertImgUrlToBase64(img.src);
+                        if (base64) {
+                            return { base64: base64, mimeType: 'image/png' };
+                        }
                     }
                 }
             }
@@ -556,7 +794,6 @@
         }
     }
 
-    // Global fetch interceptor
     const originalFetch = window.fetch;
     window.fetch = async function (...args) {
         const response = await originalFetch.apply(this, args);
@@ -567,7 +804,7 @@
                 clone.text().then(text => {
                     const match = text.match(/https:\/\/[^"'\\]+googleusercontent\.com\/[^"'\\]+/);
                     if (match && match[0]) {
-                        log('Перехвачен URL сгенерированного кадра!');
+                        log('Перехвачен URL сгенерированного ресурса!');
                         convertImgUrlToBase64(match[0]).then(b64 => {
                             if (b64) lastGeneratedBase64 = b64;
                         });

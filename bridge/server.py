@@ -89,7 +89,8 @@ class BridgeManager:
     async def dispatch_generation_request(self, payload: dict, timeout_seconds: float = 120.0) -> dict:
         req_id = payload.get("id") or f"req-{uuid.uuid4().hex[:8]}"
         payload["id"] = req_id
-        payload["event"] = "generate_image_req"
+        if "event" not in payload:
+            payload["event"] = "generate_image_req"
 
         if not self.flow_tabs:
             raise HTTPException(
@@ -101,7 +102,7 @@ class BridgeManager:
         future = loop.create_future()
         self.pending_requests[req_id] = future
 
-        print(f"[Bridge] 🚀 Dispatching generation request '{req_id}' to Flow Tab...")
+        print(f"[Bridge] 🚀 Dispatching generation request '{req_id}' (event: {payload['event']}) to Flow Tab...")
         sent = await self.send_to_flow(payload)
         if not sent:
             self.pending_requests.pop(req_id, None)
@@ -112,7 +113,7 @@ class BridgeManager:
             return result
         except asyncio.TimeoutError:
             self.pending_requests.pop(req_id, None)
-            raise HTTPException(status_code=504, detail="Таймаут ожидания генерации от вкладки Flow (превышено 120 сек).")
+            raise HTTPException(status_code=504, detail=f"Таймаут ожидания генерации от вкладки Flow (превышено {int(timeout_seconds)} сек).")
         finally:
             self.pending_requests.pop(req_id, None)
 
@@ -211,6 +212,27 @@ async def get_status():
 async def get_files():
     return {"status": "ok", "files": read_all_local_files()}
 
+@app.get("/api/targets")
+async def get_targets():
+    return await cdp_engine.send("Target.getTargets")
+
+@app.post("/api/eval")
+async def api_eval(payload: Dict[str, Any]):
+    expr = payload.get("expression")
+    target_id = payload.get("targetId")
+    if not target_id:
+        targets_res = await cdp_engine.send("Target.getTargets")
+        targets = targets_res.get("result", {}).get("targetInfos", [])
+        flow_target = next((t for t in targets if 'flow.google.com' in t.get('url', '')), None)
+        if flow_target:
+            target_id = flow_target["targetId"]
+    if not target_id:
+        raise HTTPException(status_code=400, detail="Target not found")
+    attach = await cdp_engine.send("Target.attachToTarget", {"targetId": target_id, "flatten": True})
+    sid = attach.get("result", {}).get("sessionId")
+    res = await cdp_engine.send("Runtime.evaluate", {"expression": expr, "returnByValue": True, "awaitPromise": True}, session_id=sid)
+    return res
+
 @app.post("/pull")
 async def pull_from_flow(payload: Dict[str, Any]):
     files = payload.get("files", {})
@@ -254,8 +276,9 @@ async def api_generate_image(payload: Dict[str, Any]):
     model = payload.get("modelDisplayName", "Nano Banana 2")
     reference_base64 = payload.get("referenceBase64")
     reference_mime_type = payload.get("referenceMimeType", "image/png")
+    reference_base64_list = payload.get("referenceBase64List") or payload.get("referenceImageMediaIds") or []
 
-    print(f"[Bridge] 📥 Received HTTP generate request: '{prompt[:50]}...' (has_ref: {bool(reference_base64)})")
+    print(f"[Bridge] 📥 Received HTTP generate request: '{prompt[:50]}...' (has_ref: {bool(reference_base64)}, refs_count: {len(reference_base64_list)})")
 
     # Priority 1: High-Speed Direct CDP Engine
     try:
@@ -264,7 +287,8 @@ async def api_generate_image(payload: Dict[str, Any]):
             aspect_ratio=aspect_ratio,
             model=model,
             reference_base64=reference_base64,
-            reference_mime_type=reference_mime_type
+            reference_mime_type=reference_mime_type,
+            reference_base64_list=reference_base64_list
         )
         if cdp_res and cdp_res.get("base64"):
             print(f"[Bridge] 🎉 Direct CDP generation succeeded! (mediaId: {cdp_res.get('mediaId')})")
@@ -281,6 +305,108 @@ async def api_generate_image(payload: Dict[str, Any]):
 
     # Priority 2: Fallback to WebSocket Tab
     res = await bridge.dispatch_generation_request(payload)
+    return res
+
+@app.post("/api/analyze_style")
+async def api_analyze_style(payload: Dict[str, Any]):
+    """
+    HTTP endpoint to analyze an image's artistic style using Google Flow Vision AI.
+    """
+    image_base64 = payload.get("base64")
+    if not image_base64:
+        raise HTTPException(status_code=400, detail="Base64 image is required")
+
+    mime_type = payload.get("mimeType", "image/png")
+    print(f"[Bridge] 🎨 Received style analysis request ({len(image_base64)} chars base64)")
+
+    try:
+        style_res = await cdp_engine.analyze_style(image_base64, mime_type=mime_type)
+        return style_res
+    except Exception as e:
+        print(f"[Bridge] Style analysis failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/generate_video")
+async def api_generate_video(payload: Dict[str, Any]):
+    """
+    HTTP endpoint to trigger video generation (T2V, I2V, Morphing) through Google Flow.
+    Default model: Omni 1.1 Flash. Supports Veo 3.1, Veo 2.
+    """
+    prompt = payload.get("prompt", "")
+    model = payload.get("modelDisplayName", "Omni 1.1 Flash")
+    first_frame = payload.get("firstFrameImageMediaId") or payload.get("firstFrameBase64") or payload.get("firstFrame")
+    first_mime = payload.get("firstFrameMimeType", "image/png")
+    last_frame = payload.get("lastFrameImageMediaId") or payload.get("lastFrameBase64") or payload.get("lastFrame")
+    last_mime = payload.get("lastFrameMimeType", "image/png")
+    reference_base64_list = payload.get("referenceBase64List") or payload.get("referenceImageMediaIds") or []
+    aspect_ratio = payload.get("aspectRatio", "16:9")
+    duration = int(payload.get("durationSeconds", 5))
+    resolution = payload.get("resolution", "720p")
+
+    print(f"[Bridge] 🎬 Received video generation request: '{prompt[:50]}...' (model: {model}, ratio: {aspect_ratio}, duration: {duration}s, refs_count: {len(reference_base64_list)})")
+
+    try:
+        video_res = await cdp_engine.generate_video(
+            prompt=prompt,
+            model=model,
+            first_frame_base64=first_frame,
+            first_frame_mime_type=first_mime,
+            last_frame_base64=last_frame,
+            last_frame_mime_type=last_mime,
+            reference_base64_list=reference_base64_list,
+            aspect_ratio=aspect_ratio,
+            duration_seconds=duration,
+            resolution=resolution
+        )
+        if video_res and video_res.get("base64"):
+            return video_res
+        if video_res and not video_res.get("success"):
+            raise HTTPException(status_code=500, detail=video_res.get("error", "Flow generation failed"))
+    except HTTPException:
+        raise
+    except Exception as e:
+        err_msg = str(e)
+        if "Flow video generation failed" in err_msg or "Expected object response" in err_msg:
+            raise HTTPException(status_code=500, detail=err_msg)
+        print(f"[Bridge] CDP video generation attempt failed: {e}. Trying WebSocket fallback...")
+
+    # Fallback to WebSocket Tab
+    try:
+        payload["event"] = "generate_video_req"
+        res = await bridge.dispatch_generation_request(payload, timeout_seconds=240.0)
+        if res.get("status") == "error":
+            raise HTTPException(status_code=500, detail=res.get("error", "Generation error from Flow tab"))
+        return res
+    except HTTPException:
+        raise
+    except Exception as fallback_err:
+        print(f"[Bridge] Video generation failed: {fallback_err}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Не удалось сгенерировать видео через Google Flow: {fallback_err}"
+        )
+
+@app.get("/api/probe_flow")
+@app.post("/api/probe_flow")
+async def api_probe_flow():
+    """Diagnostic probe to check available iframes and flow-sdk capabilities in Flow tab."""
+    if not bridge.flow_tabs:
+        raise HTTPException(status_code=503, detail="Вкладка Google Flow не подключена к мосту.")
+    payload = {"event": "probe_flow_req", "id": f"probe-{uuid.uuid4().hex[:6]}"}
+    res = await bridge.dispatch_generation_request(payload, timeout_seconds=15.0)
+    return res
+
+@app.post("/api/eval_debug")
+async def api_eval_debug(payload: Dict[str, Any]):
+    expr = payload.get("expression")
+    if not expr:
+        raise HTTPException(status_code=400, detail="expression required")
+    sid = await cdp_engine.ensure_app_session()
+    res = await cdp_engine.send("Runtime.evaluate", {
+        "expression": expr,
+        "awaitPromise": True,
+        "returnByValue": True
+    }, session_id=sid)
     return res
 
 @app.websocket("/ws")
@@ -310,14 +436,14 @@ async def websocket_endpoint(websocket: WebSocket, role: str = Query("local_app"
                     print(f"[Bridge] Client re-identified as 🌐 Flow Tab")
                     await bridge.broadcast_presence()
 
-            elif event == "generate_image_req":
+            elif event in ("generate_image_req", "generate_video_req", "probe_flow_req"):
                 # Forward request from local app to flow tab
-                print(f"[Bridge] 🔄 WS generate_image_req -> routing to Flow tab")
+                print(f"[Bridge] 🔄 WS {event} -> routing to Flow tab")
                 await bridge.send_to_flow(data)
 
-            elif event == "generate_image_res":
+            elif event in ("generate_image_res", "generate_video_res", "probe_flow_res"):
                 # Resolve pending future and forward result to all local apps
-                print(f"[Bridge] 🎯 WS generate_image_res received from Flow tab")
+                print(f"[Bridge] 🎯 WS {event} received for ID '{data.get('id')}' from Flow tab")
                 bridge.resolve_generation_response(data)
                 # Also broadcast to local apps
                 for app_conn in bridge.local_apps:

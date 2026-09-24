@@ -18,9 +18,11 @@ interface Props {
   regions: RegionItem[];
   onDeleteRegion: (id: string) => void;
   onSelectRegion: (id: string | null) => void;
+  onOpenStyleModal: (region: RegionItem) => void;
   selectedRegionId: string | null;
   inpaintingMode: 'mask_strict' | 'focus_guide';
   onSelectInpaintingMode: (mode: 'mask_strict' | 'focus_guide') => void;
+  onAnimateToVideo?: () => void;
   error: string | null;
 }
 
@@ -36,9 +38,11 @@ export function ModificationPanel({
   regions,
   onDeleteRegion,
   onSelectRegion,
+  onOpenStyleModal,
   selectedRegionId,
   inpaintingMode,
   onSelectInpaintingMode,
+  onAnimateToVideo,
   error 
 }: Props) {
   const [prompt, setPrompt] = useState('');
@@ -220,7 +224,7 @@ export function ModificationPanel({
             {regions.map((reg) => (
               <div
                 key={reg.id}
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-bold transition-all border cursor-pointer select-none ${
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all border cursor-pointer select-none ${
                   selectedRegionId === reg.id
                     ? 'bg-amber-500/20 text-amber-300 border-amber-500/50 shadow-md shadow-amber-500/10'
                     : 'bg-[#181824] text-slate-300 border-white/10 hover:border-amber-400/40 hover:text-white'
@@ -230,13 +234,36 @@ export function ModificationPanel({
               >
                 <span className="text-[10px] text-amber-400">@</span>
                 <span>{reg.name}</span>
+                {reg.style && (
+                  <span 
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onOpenStyleModal(reg);
+                    }}
+                    className="bg-violet-500/20 text-violet-300 border border-violet-500/30 px-1.5 py-0.2 rounded text-[9px] flex items-center gap-1 hover:bg-violet-500/40 truncate max-w-[90px]"
+                    title={`Стиль: ${reg.style.name}. Нажмите для изменения`}
+                  >
+                    <span>🎨</span>
+                    <span className="truncate">{reg.style.name}</span>
+                  </span>
+                )}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenStyleModal(reg);
+                  }}
+                  title="Настроить стиль для этой области"
+                  className="hover:bg-violet-500/30 text-slate-400 hover:text-violet-300 rounded-full w-4 h-4 flex items-center justify-center text-[10px] transition-colors ml-0.5"
+                >
+                  🎨
+                </button>
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
                     onDeleteRegion(reg.id);
                   }}
                   title="Удалить область"
-                  className="hover:bg-red-500/30 text-slate-400 hover:text-red-300 rounded-full w-4 h-4 flex items-center justify-center text-[10px] transition-colors ml-0.5"
+                  className="hover:bg-red-500/30 text-slate-400 hover:text-red-300 rounded-full w-4 h-4 flex items-center justify-center text-[10px] transition-colors"
                 >
                   ✕
                 </button>
@@ -402,6 +429,18 @@ export function ModificationPanel({
           </>
         )}
       </button>
+
+      {/* Quick Video Animation Action */}
+      {onAnimateToVideo && (
+        <button
+          onClick={onAnimateToVideo}
+          disabled={isProcessing}
+          className="w-full py-3 bg-purple-950/40 hover:bg-purple-900/60 border border-purple-500/30 rounded-2xl font-bold text-purple-200 tracking-wide transition-all active:scale-95 flex items-center justify-center gap-2 text-xs cursor-pointer whitespace-nowrap"
+        >
+          <span className="material-symbols-outlined text-base text-purple-400">movie</span>
+          <span>🎬 Оживить кадр в видео (Omni)</span>
+        </button>
+      )}
     </div>
   );
 }

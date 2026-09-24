@@ -16,8 +16,25 @@ export interface FlowGenerateImageOptions {
   referenceImageMediaIds?: string[];
   referenceBase64?: string;
   referenceMimeType?: string;
+  referenceBase64List?: string[];
   modelDisplayName?: string;
   aspectRatio?: string;
+}
+
+export interface FlowGenerateVideoOptions {
+  prompt: string;
+  modelDisplayName?: string;
+  firstFrameImageMediaId?: string;
+  firstFrameBase64?: string;
+  firstFrameMimeType?: string;
+  lastFrameImageMediaId?: string;
+  lastFrameBase64?: string;
+  lastFrameMimeType?: string;
+  referenceImageMediaIds?: string[];
+  referenceBase64List?: string[];
+  aspectRatio?: string;
+  durationSeconds?: number;
+  resolution?: string;
 }
 
 export interface BridgeStatus {
@@ -117,13 +134,21 @@ export const Flow = {
           // Prepare reference base64 if provided
           let referenceBase64: string | undefined = options.referenceBase64;
           let referenceMimeType: string | undefined = options.referenceMimeType;
-          if (!referenceBase64 && options.referenceImageMediaIds && options.referenceImageMediaIds.length > 0) {
-            const refId = options.referenceImageMediaIds[0];
-            const refItem = mediaStore.get(refId);
-            if (refItem) {
-              referenceBase64 = refItem.base64;
-              referenceMimeType = refItem.mimeType;
+          let referenceBase64List: string[] = options.referenceBase64List ? [...options.referenceBase64List] : [];
+          let referenceImageMediaIds: string[] = options.referenceImageMediaIds ? [...options.referenceImageMediaIds] : [];
+
+          if (options.referenceImageMediaIds && options.referenceImageMediaIds.length > 0) {
+            for (const refId of options.referenceImageMediaIds) {
+              const refItem = mediaStore.get(refId);
+              if (refItem && !refId.startsWith('local-media-') && !referenceImageMediaIds.includes(refId)) {
+                referenceImageMediaIds.push(refId);
+              } else if (refItem && !referenceBase64List.includes(refItem.base64)) {
+                referenceBase64List.push(refItem.base64);
+              }
             }
+          }
+          if (referenceBase64 && !referenceBase64List.includes(referenceBase64)) {
+            referenceBase64List.unshift(referenceBase64);
           }
 
           const response = await fetch(`${BRIDGE_API}/api/generate_image`, {
@@ -134,7 +159,9 @@ export const Flow = {
               aspectRatio: options.aspectRatio || '1:1',
               modelDisplayName: options.modelDisplayName || '🍌 Nano Banana Pro',
               referenceBase64,
-              referenceMimeType
+              referenceMimeType,
+              referenceBase64List,
+              referenceImageMediaIds
             })
           });
 
@@ -153,7 +180,7 @@ export const Flow = {
               name: `Flow Generated: ${options.prompt.slice(0, 30)}`
             };
             mediaStore.set(genId, item);
-            console.log('[Flow SDK] 🎉 Real Flow generation received successfully!');
+            console.log('[Flow SDK] 🎉 Real Flow generation received successfully! (mediaId: ' + genId + ')');
             return {
               mediaId: genId,
               base64: result.base64,
@@ -169,6 +196,149 @@ export const Flow = {
 
       // 2. Fallback: Local Canvas preview if bridge/tab is not connected
       return createLocalFallbackImage(options);
+    },
+
+    /**
+     * Generates a video using Google Flow Video models (Omni 1.1 Flash, Veo 3.1, etc.).
+     * Supports Text-to-Video, Image-to-Video (First Frame), and Morphing (First + Last Frame).
+     */
+    async video(options: FlowGenerateVideoOptions): Promise<{ base64: string; mimeType: string; mediaId: string }> {
+      console.log('[Flow SDK] 🎬 Flow.generate.video called with:', options);
+
+      try {
+        const bridgeStatus = await checkBridgeStatus();
+        if (bridgeStatus.online && bridgeStatus.isFlowReady) {
+          console.log('[Flow SDK] 🚀 Dispatching video generation to active Google Flow tab via Bridge...');
+
+          // Resolve first frame
+          let firstFrameImageMediaId = options.firstFrameImageMediaId;
+          let firstFrameBase64 = options.firstFrameBase64;
+          let firstFrameMimeType = options.firstFrameMimeType;
+          if (firstFrameImageMediaId) {
+            if (firstFrameImageMediaId.startsWith('local-media-')) {
+              const item = mediaStore.get(firstFrameImageMediaId);
+              if (item) {
+                firstFrameBase64 = item.base64;
+                firstFrameMimeType = item.mimeType;
+                firstFrameImageMediaId = undefined;
+              }
+            }
+          }
+
+          // Resolve last frame
+          let lastFrameImageMediaId = options.lastFrameImageMediaId;
+          let lastFrameBase64 = options.lastFrameBase64;
+          let lastFrameMimeType = options.lastFrameMimeType;
+          if (lastFrameImageMediaId) {
+            if (lastFrameImageMediaId.startsWith('local-media-')) {
+              const item = mediaStore.get(lastFrameImageMediaId);
+              if (item) {
+                lastFrameBase64 = item.base64;
+                lastFrameMimeType = item.mimeType;
+                lastFrameImageMediaId = undefined;
+              }
+            }
+          }
+
+          let referenceBase64List: string[] = options.referenceBase64List ? [...options.referenceBase64List] : [];
+          let referenceImageMediaIds: string[] = options.referenceImageMediaIds ? [...options.referenceImageMediaIds] : [];
+
+          if (options.referenceImageMediaIds && options.referenceImageMediaIds.length > 0) {
+            for (const refId of options.referenceImageMediaIds) {
+              const item = mediaStore.get(refId);
+              if (item && !refId.startsWith('local-media-') && !referenceImageMediaIds.includes(refId)) {
+                referenceImageMediaIds.push(refId);
+              } else if (item && !referenceBase64List.includes(item.base64)) {
+                referenceBase64List.push(item.base64);
+              }
+            }
+          }
+
+          const response = await fetch(`${BRIDGE_API}/api/generate_video`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              prompt: options.prompt,
+              modelDisplayName: options.modelDisplayName || 'Omni 1.1 Flash',
+              firstFrameBase64,
+              firstFrameMimeType,
+              firstFrameImageMediaId,
+              lastFrameBase64,
+              lastFrameMimeType,
+              lastFrameImageMediaId,
+              referenceBase64List,
+              referenceImageMediaIds,
+              aspectRatio: options.aspectRatio || '16:9',
+              durationSeconds: options.durationSeconds ?? 5,
+              resolution: options.resolution || '720p'
+            })
+          });
+
+          if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(`Bridge video error (${response.status}): ${errText}`);
+          }
+
+          const result = await response.json();
+          if (result.base64) {
+            const genId = result.mediaId || `flow-vid-${crypto.randomUUID()}`;
+            const item: FlowMediaItem = {
+              mediaId: genId,
+              base64: result.base64,
+              mimeType: result.mimeType || 'video/mp4',
+              name: `Flow Video: ${options.prompt.slice(0, 30)}`
+            };
+            mediaStore.set(genId, item);
+            console.log('[Flow SDK] 🎥 Real Flow video generated successfully!');
+            return {
+              mediaId: genId,
+              base64: result.base64,
+              mimeType: result.mimeType || 'video/mp4'
+            };
+          } else {
+            throw new Error(result.error || 'No video base64 returned');
+          }
+        } else {
+          throw new Error('Bridge is offline or flow.google.com tab is not connected');
+        }
+      } catch (bridgeErr: any) {
+        console.error('[Flow SDK] ❌ Video generation failed:', bridgeErr);
+        throw bridgeErr;
+      }
+    },
+
+    /**
+     * Generates text or multimodal AI vision analysis via Google Flow.
+     */
+    async text(promptOrOptions: string | { prompt: string; images?: Array<{ base64: string; mimeType: string }> }): Promise<{ text: string }> {
+      const prompt = typeof promptOrOptions === 'string' ? promptOrOptions : promptOrOptions.prompt;
+      const images = typeof promptOrOptions === 'object' ? promptOrOptions.images : undefined;
+
+      // If multimodal image analysis
+      if (images && images.length > 0) {
+        try {
+          const res = await fetch(`${BRIDGE_API}/api/analyze_style`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              base64: images[0].base64,
+              mimeType: images[0].mimeType || 'image/png'
+            })
+          });
+          if (res.ok) {
+            const data = await res.json();
+            return {
+              text: data.raw_text || JSON.stringify(data.style || {}, null, 2)
+            };
+          }
+        } catch (err) {
+          console.warn('[Flow SDK] text analyze_style request failed:', err);
+        }
+      }
+
+      return {
+        text: `Flow AI response for: ${prompt}`
+      };
     }
   },
 

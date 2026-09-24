@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Flow, checkBridgeStatus, BridgeStatus } from '../mock-flow-sdk';
 
 interface GeneratedItem {
@@ -12,7 +12,7 @@ interface GeneratedItem {
 }
 
 interface BasicGeneratorProps {
-  onSendToEditor?: (mediaItem: { base64: string; mimeType: string; name: string }) => void;
+  onSendToEditor?: (mediaItem: { base64: string; mimeType: string; name: string; mediaId?: string }) => void;
   guidedPreset?: { prompt: string; model: string; aspect: string } | null;
 }
 
@@ -31,6 +31,24 @@ export function BasicGenerator({ onSendToEditor, guidedPreset }: BasicGeneratorP
   const [isGenerating, setIsGenerating] = useState(false);
   const [currentImage, setCurrentImage] = useState<GeneratedItem | null>(null);
   const [history, setHistory] = useState<GeneratedItem[]>([]);
+  const [referenceImages, setReferenceImages] = useState<string[]>([]);
+  const refFileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleAddReferenceFiles = (files: FileList | null) => {
+    if (!files) return;
+    Array.from(files).forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const b64 = (reader.result as string).split(',')[1];
+        setReferenceImages((prev) => (prev.length < 4 ? [...prev, b64] : prev));
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const handleRemoveReferenceImage = (index: number) => {
+    setReferenceImages((prev) => prev.filter((_, i) => i !== index));
+  };
   const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus>({
     online: false,
     flowTabsConnected: 0,
@@ -72,7 +90,9 @@ export function BasicGenerator({ onSendToEditor, guidedPreset }: BasicGeneratorP
       const res = await Flow.generate.image({
         prompt: prompt.trim(),
         aspectRatio: aspectRatio,
-        modelDisplayName: model
+        modelDisplayName: model,
+        referenceBase64List: referenceImages.length > 0 ? referenceImages : undefined,
+        referenceBase64: referenceImages.length > 0 ? referenceImages[0] : undefined
       });
 
       if (!res.base64) {
@@ -223,6 +243,63 @@ export function BasicGenerator({ onSendToEditor, guidedPreset }: BasicGeneratorP
           </div>
         </div>
 
+        {/* Reference Images */}
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+              Референсы ({referenceImages.length}/4)
+            </label>
+            <span className="text-[10px] text-violet-400 font-mono">Стиль / Композиция</span>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            {referenceImages.map((b64, idx) => (
+              <div key={idx} className="relative group w-14 h-14 rounded-lg overflow-hidden border border-violet-500/40 bg-black/40 flex-shrink-0">
+                <img
+                  src={`data:image/png;base64,${b64}`}
+                  alt={`Ref ${idx + 1}`}
+                  className="w-full h-full object-cover"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleRemoveReferenceImage(idx)}
+                  className="absolute inset-0 bg-black/70 opacity-0 group-hover:opacity-100 flex items-center justify-center text-red-400 transition-opacity cursor-pointer"
+                  title="Удалить референс"
+                >
+                  <span className="material-symbols-outlined text-sm">delete</span>
+                </button>
+                <span className="absolute bottom-0.5 right-1 text-[8px] font-mono text-white/70 bg-black/60 px-1 rounded">
+                  #{idx + 1}
+                </span>
+              </div>
+            ))}
+
+            {referenceImages.length < 4 && (
+              <button
+                type="button"
+                onClick={() => refFileInputRef.current?.click()}
+                className="w-14 h-14 rounded-lg border border-dashed border-white/20 hover:border-violet-400/60 bg-white/5 hover:bg-violet-950/20 flex flex-col items-center justify-center text-slate-400 hover:text-violet-300 transition-all cursor-pointer flex-shrink-0"
+                title="Добавить изображение-референс"
+              >
+                <span className="material-symbols-outlined text-base">add_photo_alternate</span>
+                <span className="text-[8px] font-bold mt-0.5">+Реф</span>
+              </button>
+            )}
+          </div>
+
+          <input
+            ref={refFileInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              handleAddReferenceFiles(e.target.files);
+              e.target.value = '';
+            }}
+          />
+        </div>
+
         {/* Prompt Input */}
         <div className="space-y-2">
           <div className="flex items-center justify-between">
@@ -306,7 +383,8 @@ export function BasicGenerator({ onSendToEditor, guidedPreset }: BasicGeneratorP
                     onClick={() => onSendToEditor({
                       base64: currentImage.base64,
                       mimeType: currentImage.mimeType,
-                      name: currentImage.prompt.slice(0, 25)
+                      name: currentImage.prompt.slice(0, 25),
+                      mediaId: currentImage.id
                     })}
                     className="px-3.5 py-2 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-lg shadow-violet-600/20 whitespace-nowrap flex-shrink-0"
                   >
