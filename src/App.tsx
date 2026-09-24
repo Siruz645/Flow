@@ -213,27 +213,68 @@ export default function App() {
     }
   };
 
+  const compileFlowInpaintingPrompt = (
+    userPrompt: string,
+    manualRegions: RegionItem[],
+    selectedIndex: number | null,
+    detections: Detection[],
+    mediaSize: { width: number; height: number } | null,
+    inpaintingMode: 'mask_strict' | 'focus_guide'
+  ): string => {
+    let expandedPrompt = userPrompt;
+
+    if (manualRegions.length > 0 && mediaSize) {
+      const regionAnchors = manualRegions.map(r => {
+        const left = Math.round((r.box.originX / mediaSize.width) * 100);
+        const top = Math.round((r.box.originY / mediaSize.height) * 100);
+        const width = Math.round((r.box.width / mediaSize.width) * 100);
+        const height = Math.round((r.box.height / mediaSize.height) * 100);
+        const cX = Math.round(((r.box.originX + r.box.width / 2) / mediaSize.width) * 100);
+        const cY = Math.round(((r.box.originY + r.box.height / 2) / mediaSize.height) * 100);
+
+        const hName = cX < 33 ? 'left' : cX > 66 ? 'right' : 'horizontal center';
+        const vName = cY < 33 ? 'upper' : cY > 66 ? 'lower' : 'vertical middle';
+
+        // Replace tag in user text
+        expandedPrompt = expandedPrompt.replaceAll(
+          `@${r.name}`,
+          `[Target '${r.name}' at coordinates X:${cX}%, Y:${cY}%]`
+        );
+
+        return `'${r.name}' anchor: center at (X:${cX}%, Y:${cY}%), box [X:${left}%-${left + width}%, Y:${top}%-${top + height}%], ${vName}-${hName} area`;
+      }).join('; ');
+
+      if (inpaintingMode === 'focus_guide') {
+        return `CRITICAL SPATIAL INSTRUCTION: Place and anchor the requested modification EXACTLY at the designated target region coordinates (${regionAnchors}). DO NOT move, displace, or relocate the primary subject/text/modification to other parts of the image. You are allowed and encouraged to naturally adapt the local surface geometry, reflections, lighting, and ambient surrounding environment around this anchor point to seamlessly integrate the modification into the scene. Modification instructions: ${expandedPrompt}. Ensure high-resolution photographic realism, matching camera perspective, and seamless blending.`;
+      } else {
+        return `CONTEXTUAL INPAINTING INSTRUCTION: Carefully examine the entire reference image context (subject, clothing/material surface texture, curvature, shadows, and ambient lighting). Apply the requested modification (${expandedPrompt}) directly onto the existing surface/material at the target coordinates (${regionAnchors}). The modification must blend naturally with the surrounding texture, lighting direction, and material folds, making it look authentically part of the scene.`;
+      }
+    }
+
+    if (selectedIndex !== null && detections[selectedIndex]) {
+      const d = detections[selectedIndex];
+      return `Target object: the ${d.label} in the scene. Modify as follows: ${expandedPrompt}. Maintain consistent lighting, shadows, and scene realism.`;
+    }
+
+    return `Modify the image as instructed: ${expandedPrompt}. Maintain scene consistency, natural lighting, and photographic realism.`;
+  };
+
   const handleModify = async (userPrompt: string) => {
     if (!activeMedia || !mediaSize) return;
     setIsProcessing(true);
     setError(null);
     try {
-      let spatialContext = '';
-      if (manualRegions.length > 0) {
-        const descriptions = manualRegions.map(r => {
-          const cX = (r.box.originX + r.box.width / 2) / mediaSize.width;
-          const cY = (r.box.originY + r.box.height / 2) / mediaSize.height;
-          const h = cX < 0.35 ? 'left' : cX > 0.65 ? 'right' : 'center';
-          const v = cY < 0.35 ? 'top' : cY > 0.65 ? 'bottom' : 'middle';
-          return `"${r.name}" (${h}-${v} area)`;
-        }).join(', ');
-        spatialContext = `Spatial reference of user-marked areas: ${descriptions}. `;
-      } else if (selectedIndex !== null && detections[selectedIndex]) {
-        spatialContext = `Focus target: ${detections[selectedIndex].label}. `;
-      }
-
       const aspect = getFlowAspectRatio(mediaSize.width, mediaSize.height);
-      const promptToModel = `${spatialContext}Modify the image as instructed: ${userPrompt}. Keep overall background lighting, scene perspective, and photographic coherence.`;
+      const promptToModel = compileFlowInpaintingPrompt(
+        userPrompt,
+        manualRegions,
+        selectedIndex,
+        detections,
+        mediaSize,
+        inpaintingMode
+      );
+
+      console.log('[App.tsx] 🎨 Compiled Prompt for Flow:', promptToModel);
 
       const generation = await Flow.generate.image({
         prompt: promptToModel,
